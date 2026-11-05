@@ -33,19 +33,19 @@ fn main() -> computer_use::Result<()> {
 
 `Computer` is the main entry point:
 
-| Method | Does |
-|---|---|
-| `list_apps` | Running apps (frontmost first), then installed apps |
-| `get_app_state` | Captures the app's window: element tree, focus, selection, screenshot. Launches the app in the background if needed |
-| `query` | Finds elements by text and/or role without taking a screenshot |
-| `click` | Clicks an element (by accessibility action when that's equivalent) or a screenshot pixel. Supports left/right/middle buttons and multi-click |
-| `perform_secondary_action` | Invokes a named action such as `Show Menu`, `Raise` or `Increment` |
-| `scroll` | Scrolls an element by pages (fractions allowed) |
-| `drag` | Drags between two screenshot pixels |
-| `type_text` | Types literal text, inserting through accessibility when possible |
-| `press_key` | Presses xdotool-style chords such as `super+c`, `ctrl+shift+Tab` or `KP_0` |
-| `set_value` | Writes the value of a settable element |
-| `select_text` | Selects text inside an element, or puts the caret before or after it |
+| Method                     | Does                                                                                                                                         |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list_apps`                | Running apps (frontmost first), then installed apps                                                                                          |
+| `get_app_state`            | Captures the app's window: element tree, focus, selection, screenshot. Launches the app in the background if needed                          |
+| `query`                    | Finds elements by text and/or role without taking a screenshot                                                                               |
+| `click`                    | Clicks an element (by accessibility action when that's equivalent) or a screenshot pixel. Supports left/right/middle buttons and multi-click |
+| `perform_secondary_action` | Invokes a named action such as `Show Menu`, `Raise` or `Increment`                                                                           |
+| `scroll`                   | Scrolls an element by pages (fractions allowed)                                                                                              |
+| `drag`                     | Drags between two screenshot pixels                                                                                                          |
+| `type_text`                | Types literal text, inserting through accessibility when possible                                                                            |
+| `press_key`                | Presses xdotool-style chords such as `super+c`, `ctrl+shift+Tab` or `KP_0`                                                                   |
+| `set_value`                | Writes the value of a settable element                                                                                                       |
+| `select_text`              | Selects text inside an element, or puts the caret before or after it                                                                         |
 
 The building blocks are public as well. `AppState` and `Element` are plain data.
 `keys::KeyChord` is an xdotool key parser. `text::TextSelection` resolves text ranges.
@@ -54,11 +54,11 @@ layer, so you can drive a fake desktop in tests or add a platform.
 
 ## Platforms
 
-| Platform | Tree & actions | Screenshot | Input |
-|---|---|---|---|
-| macOS 14+ | Accessibility API | Window-server capture, then ScreenCaptureKit | `CGEvent` posted to the app's process (optionally with SkyLight synthetic focus), or globally |
-| Windows 10+ | UI Automation | `PrintWindow` / GDI | Window messages to the app (background) or `SendInput` |
-| Linux (X11) | AT-SPI | X11 `GetImage` | AT-SPI device event controller |
+| Platform    | Tree & actions    | Screenshot                                   | Input                                                                                         |
+| ----------- | ----------------- | -------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| macOS 14+   | Accessibility API | Window-server capture, then ScreenCaptureKit | `CGEvent` posted to the app's process (optionally with SkyLight synthetic focus), or globally |
+| Windows 10+ | UI Automation     | `PrintWindow` / GDI                          | Window messages to the app (background) or `SendInput`                                        |
+| Linux (X11) | AT-SPI            | X11 `GetImage`                               | AT-SPI device event controller                                                                |
 
 By default, synthetic input uses `Delivery::Background`. Events go to the target app without
 moving your pointer or changing focus, where the OS allows it. On macOS, Command-key shortcuts
