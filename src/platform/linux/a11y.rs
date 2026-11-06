@@ -317,9 +317,33 @@ fn selected_text(conn: &Connection, element: &LinuxElement) -> Option<String> {
     (end > start).then(|| text.get_text(start, end).ok()).flatten().filter(|s| !s.is_empty())
 }
 
+/// Reads an element's action names, indexed as `DoAction` expects.
+///
+/// `GetActions` reports each action's localized name, which some toolkits (Chromium among them)
+/// leave empty; `GetName` still returns the real name, so it fills any gaps.
+fn action_names(action: &ActionProxyBlocking<'_>) -> zbus::Result<Vec<String>> {
+    let listed = match action.get_actions() {
+        Ok(list) => list.into_iter().map(|a| a.name).collect(),
+        Err(err) => {
+            let count = action.n_actions().map_err(|_| err)?;
+            vec![String::new(); usize::try_from(count).unwrap_or(0)]
+        }
+    };
+    Ok(listed
+        .into_iter()
+        .enumerate()
+        .map(|(i, name)| {
+            if !name.trim().is_empty() {
+                return name;
+            }
+            i32::try_from(i).ok().and_then(|i| action.get_name(i).ok()).unwrap_or_default()
+        })
+        .collect())
+}
+
 fn actions(conn: &Connection, element: &LinuxElement) -> Vec<Action> {
     let Ok(action) = proxy::<ActionProxyBlocking<'_>>(conn, element) else { return Vec::new() };
-    let names = action.get_actions().map(|list| list.into_iter().map(|a| a.name).collect::<Vec<_>>());
+    let names = action_names(&action);
     let primary = names.as_ref().ok().and_then(|names| names.iter().position(|n| is_primary_action(n)));
     names
         .unwrap_or_default()
@@ -388,10 +412,12 @@ pub(crate) fn format_number(value: f64) -> String {
 
 pub(crate) fn perform_action(conn: &Connection, element: &LinuxElement, name: &str) -> Result<()> {
     let action: ActionProxyBlocking<'_> = proxy(conn, element)?;
-    let actions = action.get_actions().map_err(dbus)?;
-    let index = actions
+    let names = action_names(&action).map_err(dbus)?;
+    let index = names
         .iter()
-        .position(|a| a.name.eq_ignore_ascii_case(name) || Action::new(action_name(&a.name), false).matches(name))
+        .position(|n| {
+            !n.is_empty() && (n.eq_ignore_ascii_case(name) || Action::new(action_name(n), false).matches(name))
+        })
         .ok_or_else(|| Error::action(format!("element has no action {name:?}")))?;
     let index = i32::try_from(index).map_err(|_| Error::action("action index out of range"))?;
     if action.do_action(index).map_err(dbus)? {
