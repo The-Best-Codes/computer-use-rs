@@ -354,17 +354,34 @@ fn actions(conn: &Connection, element: &LinuxElement) -> Vec<Action> {
         .collect()
 }
 
+/// Whether an action is what a left click on the element would do.
+///
+/// Besides the common verbs, this covers Chromium's: it names each element's default action after
+/// what it does (`open`, `check`, `select`, ...), uses `doDefault` when it has no better verb, and
+/// `clickAncestor` for content inside a clickable parent.
 pub(crate) fn is_primary_action(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
-        "click" | "press" | "activate" | "jump" | "default.activate" | "invoke"
+        "click"
+            | "press"
+            | "activate"
+            | "jump"
+            | "default.activate"
+            | "invoke"
+            | "dodefault"
+            | "open"
+            | "check"
+            | "uncheck"
+            | "select"
+            | "toggle"
+            | "clickancestor"
     )
 }
 
 pub(crate) fn action_name(raw: &str) -> String {
     match raw.to_ascii_lowercase().as_str() {
         "menu" | "popup" | "popupmenu" | "popup menu" | "popup_menu" | "context menu" | "contextmenu" | "showmenu"
-        | "show menu" | "show_menu" => "showMenu".to_owned(),
+        | "show menu" | "show_menu" | "showcontextmenu" | "show context menu" => "showMenu".to_owned(),
         _ => raw.to_owned(),
     }
 }
@@ -492,9 +509,13 @@ mod tests {
     fn maps_actions() {
         assert!(is_primary_action("click"));
         assert!(is_primary_action("Activate"));
+        assert!(is_primary_action("doDefault"));
+        assert!(is_primary_action("clickAncestor"));
         assert!(!is_primary_action("showMenu"));
+        assert!(!is_primary_action("showContextMenu"));
         assert!(Action::new(action_name("menu"), false).matches("Show Menu"));
         assert!(Action::new(action_name("showMenu"), false).matches("Show Menu"));
+        assert!(Action::new(action_name("showContextMenu"), false).matches("Show Menu"));
         assert_eq!(action_name("toggle"), "toggle");
     }
 

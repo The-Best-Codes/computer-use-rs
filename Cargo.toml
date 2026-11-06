@@ -1,6 +1,6 @@
 [package]
 name = "computer-use-rs"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2024"
 rust-version = "1.89"
 description = "Cross-platform computer-use primitives: read app accessibility trees, take window screenshots, and drive apps with accessibility actions and synthetic input."
