@@ -7,6 +7,11 @@ It is a general-purpose library: use it for UI automation and scripting, end-to-
 desktop apps, accessibility tooling, or AI agents that operate a computer. You get a typed Rust
 API with no runtime, server or protocol attached.
 
+> Heads up! Some portions of this project are AI-generated.
+
+> [!NOTE]
+> This project is developed and maintained by [AgentOne](https://github.com/The-Best-Codes/agent-one). We use it to power the Computer Use feature in the AgentOne desktop app, so we open-sourced it for everyone!
+
 ```rust,no_run
 use computer_use::{CaptureOptions, ClickOptions, ClickTarget, Computer, ElementQuery};
 
