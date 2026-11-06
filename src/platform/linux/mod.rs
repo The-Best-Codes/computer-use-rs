@@ -103,7 +103,8 @@ impl Backend for LinuxBackend {
             capture.selected_text = walk.selected_text;
         }
         if request.include_screenshot {
-            match screenshot::capture(&self.session, capture.window.frame)? {
+            let title = capture.window.title.as_deref();
+            match screenshot::capture(&self.session, capture.window.frame, app.pid, title)? {
                 Shot::Captured(frame, image) => {
                     capture.window.frame = frame;
                     capture.screenshot = Some(image);

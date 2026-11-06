@@ -67,7 +67,7 @@ layer, so you can drive a fake desktop in tests or add a platform.
 | ----------- | ----------------- | -------------------------------------------- | --------------------------------------------------------------------------------------------- |
 | macOS 14+   | Accessibility API | Window-server capture, then ScreenCaptureKit | `CGEvent` posted to the app's process (optionally with SkyLight synthetic focus), or globally |
 | Windows 10+ | UI Automation     | `PrintWindow` / GDI                          | Window messages to the app (background) or `SendInput`                                        |
-| Linux (X11) | AT-SPI            | X11 `GetImage`                               | AT-SPI device event controller                                                                |
+| Linux       | AT-SPI            | X11 `GetImage` of the app's window           | AT-SPI device event controller                                                                |
 
 By default, synthetic input uses `Delivery::Background`. Events go to the target app without
 moving your pointer or changing focus, where the OS allows it. On macOS, Command-key shortcuts
@@ -85,8 +85,11 @@ the front first.
   appear to have no windows. `Computer::permissions()` reports the current state, and
   `Computer::request_permissions()` shows the system prompts.
 - **Linux:** the session's accessibility bus must be running. It is by default on GNOME and
-  KDE. On Wayland you get trees and actions but no screenshots, and input only reaches
-  X11/XWayland apps.
+  KDE. `Computer::new()` turns on the desktop's accessibility flag, which Chromium, Electron
+  and Firefox apps check only at startup: those already running are listed with
+  `AppInfo::needs_restart` and must be restarted before they can be inspected. On Wayland you
+  get trees and actions, but screenshots only of X11/XWayland windows (other captures are
+  omitted with a note), and input only reaches X11/XWayland apps.
 - **Windows:** no setup. The process opts into per-monitor DPI awareness, so coordinates are
   physical pixels.
 

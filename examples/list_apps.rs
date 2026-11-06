@@ -6,9 +6,10 @@
 fn main() -> computer_use::Result<()> {
     let computer = computer_use::Computer::new()?;
     for app in computer.list_apps()? {
-        let status = match (app.is_running, app.is_active) {
-            (true, true) => "active",
-            (true, false) => "running",
+        let status = match (app.is_running, app.is_active, app.needs_restart) {
+            (true, _, true) => "restart",
+            (true, true, _) => "active",
+            (true, false, _) => "running",
             _ => "installed",
         };
         let pid = app.pid.map(|p| format!(" pid {p}")).unwrap_or_default();

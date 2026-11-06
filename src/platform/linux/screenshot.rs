@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use x11rb::connection::Connection as _;
-use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat, ImageOrder, Screen, Visualtype};
+use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _, ImageFormat, ImageOrder, Screen, Visualtype};
 use x11rb::reexports::x11rb_protocol::parse_display::parse_display;
 use x11rb::reexports::x11rb_protocol::xauth::Family;
 use x11rb::rust_connection::{DefaultStream, RustConnection};
@@ -17,7 +17,12 @@ pub(crate) enum Shot {
     Omitted(String),
 }
 
-pub(crate) fn capture(session: &SessionEnv, frame: Rect) -> Result<Shot> {
+/// Captures `frame` from the X server.
+///
+/// When the app has its own X11 window (an X11 session, or an `XWayland` app under Wayland), that
+/// window is read directly. Otherwise the root window is read, which only works on X11: under
+/// Wayland the root window of the rootless `XWayland` server has no contents.
+pub(crate) fn capture(session: &SessionEnv, frame: Rect, pid: Option<u32>, title: Option<&str>) -> Result<Shot> {
     let omitted = |reason: &str| Ok(Shot::Omitted(format!("Screenshot omitted: {reason}")));
     if frame.is_empty() {
         return omitted("the window has no on-screen frame");
@@ -26,17 +31,42 @@ pub(crate) fn capture(session: &SessionEnv, frame: Rect) -> Result<Shot> {
     let Some((conn, screen_num)) = connect(display, session.xauthority().as_deref()) else {
         return omitted(&format!("cannot connect to X11 display {display}"));
     };
-    let setup = conn.setup();
-    let Some(screen) = setup.roots.get(screen_num) else { return omitted("the X11 screen does not exist") };
+    let Some(screen) = conn.setup().roots.get(screen_num) else { return omitted("the X11 screen does not exist") };
     let bounds = Rect::new(0.0, 0.0, f64::from(screen.width_in_pixels), f64::from(screen.height_in_pixels));
+    let window = pid.and_then(|pid| client_window(&conn, screen.root, pid, title, frame));
+    let (drawable, origin, frame) = match window {
+        Some((window, window_frame)) => (window, window_frame.origin, window_frame),
+        None if session.get("WAYLAND_DISPLAY").is_some() => {
+            return omitted("the window is a native Wayland window, which cannot be captured yet");
+        }
+        None => (screen.root, Rect::default().origin, frame),
+    };
+    // GetImage fails unless the whole rectangle is on screen.
     let Some(area) = frame.intersection(&bounds) else { return omitted("the window is off screen") };
-    let (x, y) = (pixel_i16(area.min_x()), pixel_i16(area.min_y()));
     let (width, height) = (pixel_u16(area.size.width), pixel_u16(area.size.height));
     if width == 0 || height == 0 {
         return omitted("the window is off screen");
     }
+    let (x, y) = (pixel_i16(area.min_x() - origin.x), pixel_i16(area.min_y() - origin.y));
+    match read_image(&conn, screen, drawable, (x, y, width, height)) {
+        Ok(image) if looks_black(&image) => omitted("the captured frame was black"),
+        Ok(image) => {
+            let captured = Rect::new(area.min_x().round(), area.min_y().round(), f64::from(width), f64::from(height));
+            Ok(Shot::Captured(captured, image))
+        }
+        Err(e) => omitted(&e.to_string()),
+    }
+}
+
+fn read_image(
+    conn: &RustConnection,
+    screen: &Screen,
+    drawable: u32,
+    (x, y, width, height): (i16, i16, u16, u16),
+) -> Result<RawImage> {
+    let setup = conn.setup();
     let reply = conn
-        .get_image(ImageFormat::Z_PIXMAP, screen.root, x, y, width, height, u32::MAX)
+        .get_image(ImageFormat::Z_PIXMAP, drawable, x, y, width, height, u32::MAX)
         .map_err(|e| Error::platform(format!("X11 GetImage failed: {e}")))?
         .reply()
         .map_err(|e| Error::platform(format!("X11 GetImage failed: {e}")))?;
@@ -54,17 +84,48 @@ pub(crate) fn capture(session: &SessionEnv, frame: Rect) -> Result<Shot> {
         msb_first: setup.image_byte_order == ImageOrder::MSB_FIRST,
         masks: [visual.red_mask, visual.green_mask, visual.blue_mask],
     };
-    let image = RawImage {
+    Ok(RawImage {
         width: u32::from(width),
         height: u32::from(height),
         rgba: to_rgba(&reply.data, u32::from(width), u32::from(height), &layout)?,
+    })
+}
+
+/// The app's top-level X11 window (from the window manager's `_NET_CLIENT_LIST`) and its frame
+/// in root coordinates: the one titled `title`, else the one overlapping `frame` most.
+fn client_window(conn: &RustConnection, root: u32, pid: u32, title: Option<&str>, frame: Rect) -> Option<(u32, Rect)> {
+    let atom = |name: &str| conn.intern_atom(true, name.as_bytes()).ok()?.reply().ok().map(|r| r.atom);
+    let (client_list, wm_pid, wm_name, utf8) =
+        (atom("_NET_CLIENT_LIST")?, atom("_NET_WM_PID")?, atom("_NET_WM_NAME")?, atom("UTF8_STRING")?);
+    let property = |window: u32, property: u32, kind: u32, len: u32| {
+        conn.get_property(false, window, property, kind, 0, len).ok()?.reply().ok()
     };
-    // Under Wayland the X11 root window shows native windows as black.
-    if looks_black(&image) {
-        return omitted("the captured frame was black");
+    let windows: Vec<u32> = property(root, client_list, AtomEnum::WINDOW.into(), 4096)?.value32()?.collect();
+    let mut candidates = Vec::new();
+    for window in windows {
+        let owner = property(window, wm_pid, AtomEnum::CARDINAL.into(), 1).and_then(|r| r.value32()?.next());
+        if owner != Some(pid) {
+            continue;
+        }
+        let Some(geometry) = conn.get_geometry(window).ok().and_then(|c| c.reply().ok()) else { continue };
+        let Some(position) = conn.translate_coordinates(window, root, 0, 0).ok().and_then(|c| c.reply().ok()) else {
+            continue;
+        };
+        let rect = Rect::new(
+            f64::from(position.dst_x),
+            f64::from(position.dst_y),
+            f64::from(geometry.width),
+            f64::from(geometry.height),
+        );
+        let name = property(window, wm_name, utf8, 1024).map(|r| String::from_utf8_lossy(&r.value).into_owned());
+        candidates.push((window, rect, name));
     }
-    let captured = Rect::new(f64::from(x), f64::from(y), f64::from(width), f64::from(height));
-    Ok(Shot::Captured(captured, image))
+    let overlap = |rect: &Rect| rect.intersection(&frame).map_or(0.0, |r| r.size.width * r.size.height);
+    candidates
+        .iter()
+        .find(|(_, _, name)| title.is_some() && name.as_deref() == title)
+        .or_else(|| candidates.iter().max_by(|a, b| overlap(&a.1).total_cmp(&overlap(&b.1))))
+        .map(|(window, rect, _)| (*window, *rect))
 }
 
 fn connect(display: &str, xauthority: Option<&Path>) -> Option<(RustConnection, usize)> {

@@ -19,6 +19,12 @@ pub struct AppInfo {
     pub is_active: bool,
     /// Title of the app's main window, when the platform reports one. Queries also match it.
     pub window_title: Option<String>,
+    /// The app is running but does not expose its UI to accessibility, so it cannot be
+    /// inspected or controlled until it is quit and started again.
+    ///
+    /// Only set on Linux, for browser-engine apps started before desktop accessibility was
+    /// turned on.
+    pub needs_restart: bool,
 }
 
 impl AppInfo {
@@ -54,6 +60,13 @@ impl AppInfo {
     #[must_use]
     pub const fn with_active(mut self, active: bool) -> Self {
         self.is_active = active;
+        self
+    }
+
+    /// Marks the app as running without an accessibility tree (see [`AppInfo::needs_restart`]).
+    #[must_use]
+    pub const fn with_needs_restart(mut self, needs_restart: bool) -> Self {
+        self.needs_restart = needs_restart;
         self
     }
 
@@ -103,7 +116,7 @@ impl AppInfo {
         if bundle.as_deref().and_then(|b| b.rsplit('.').next()).is_some_and(|last| last == q_stem) {
             return Some(3);
         }
-        if name.starts_with(q_stem) {
+        if name.starts_with(q_stem) || name.split_whitespace().any(|word| word == q_stem) {
             return Some(4);
         }
         let title = self.window_title.as_deref().map(str::to_lowercase);

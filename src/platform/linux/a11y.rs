@@ -61,7 +61,6 @@ fn session_bus(session: &SessionEnv) -> Result<Connection> {
 /// Turns on `org.a11y.Status.IsEnabled`, the flag screen readers set.
 ///
 /// GTK apps always register on the accessibility bus, but some apps only do so if this flag is on when they start.
-/// Without it Chrome, Discord, VS Code and the like are invisible.
 /// Best effort: failures are ignored, since GTK apps work either way.
 pub(crate) fn enable_accessibility(session: &SessionEnv) {
     let Ok(bus) = session_bus(session) else { return };
