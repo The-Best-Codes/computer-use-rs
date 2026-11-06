@@ -205,7 +205,7 @@ pub(super) fn type_text(target: &Target, text: &str) -> Result<()> {
             .collect();
         return post(hwnd, &messages);
     }
-    activate(target);
+    activate(target)?;
     for unit in text.encode_utf16() {
         let inputs = match unit {
             0x0A => key_inputs(&[], VirtualKey { vk: VK_RETURN.0, extended: false }),
@@ -228,7 +228,7 @@ pub(super) fn press_key(target: &Target, chord: &KeyChord) -> Result<()> {
         };
         return post(hwnd, &messages);
     }
-    activate(target);
+    activate(target)?;
     let inputs = match &stroke {
         Stroke::Keys { modifiers, key, .. } => key_inputs(modifiers, *key),
         Stroke::Unicode(c) => {
@@ -331,15 +331,33 @@ fn focus_window(root: HWND) -> HWND {
     if ok && !info.hwndFocus.is_invalid() { info.hwndFocus } else { root }
 }
 
-fn activate(target: &Target) {
-    if foreground_window().is_some_and(|fg| window_pid(fg) == target.pid) {
-        return;
+fn activate(target: &Target) -> Result<()> {
+    let is_foreground = || foreground_window().is_some_and(|fg| window_pid(fg) == target.pid);
+    if is_foreground() {
+        return Ok(());
     }
-    if let Some(root) = target.root() {
-        // SAFETY: plain FFI call; Windows may refuse, which is reported as `FALSE` and ignored.
+    let root = target
+        .root()
+        .ok_or_else(|| Error::WindowNotFound(format!("process {} has no window to activate", target.pid)))?;
+    // SAFETY: plain FFI call; Windows may refuse, which is checked below.
+    let _ = unsafe { SetForegroundWindow(root) };
+    if !wait_for(is_foreground) {
+        // Sending input lifts the foreground lock; a zero-distance move has no side effects.
+        send(&[mouse_input(0, 0, 0, MOUSEEVENTF_MOVE)])?;
+        // SAFETY: plain FFI call, checked below.
         let _ = unsafe { SetForegroundWindow(root) };
-        std::thread::sleep(Duration::from_millis(50));
     }
+    if wait_for(is_foreground) { Ok(()) } else { Err(Error::action("could not bring the app to the foreground")) }
+}
+
+fn wait_for(condition: impl Fn() -> bool) -> bool {
+    for _ in 0..10 {
+        if condition() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    condition()
 }
 
 fn child_at(root: HWND, screen: POINT) -> HWND {
@@ -383,9 +401,11 @@ fn round_to_i32(value: f64) -> i32 {
     if value.is_nan() { 0 } else { value.round().clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32 }
 }
 
+// Windows maps back with `normalized * extent / 65536` rounded down, so aim at the pixel center.
 fn normalize(value: f64, origin: i32, extent: i32) -> i32 {
-    let span = f64::from((extent - 1).max(1));
-    round_to_i32(((value - f64::from(origin)) * 65535.0 / span).clamp(0.0, 65535.0))
+    let extent = extent.max(1);
+    let pixel = round_to_i32(value).saturating_sub(origin).clamp(0, extent - 1);
+    round_to_i32(((f64::from(pixel) + 0.5) * 65536.0 / f64::from(extent)).floor().min(65535.0))
 }
 
 fn move_input(point: Point) -> INPUT {
@@ -467,11 +487,11 @@ mod tests {
 
     #[test]
     fn normalizes_to_virtual_desktop() {
-        assert_eq!(normalize(0.0, 0, 1920), 0);
-        assert_eq!(normalize(1919.0, 0, 1920), 65535);
-        assert_eq!(normalize(-1920.0, -1920, 3840), 0);
-        assert_eq!(normalize(5000.0, 0, 1920), 65535);
-        assert_eq!(normalize(959.5, 0, 1920), 32751);
+        for pixel in 0..1920 {
+            assert_eq!(normalize(f64::from(pixel), 0, 1920) * 1920 / 65536, pixel);
+        }
+        assert_eq!(normalize(-1920.0, -1920, 3840), 8);
+        assert_eq!(normalize(5000.0, 0, 1920), normalize(1919.0, 0, 1920));
     }
 
     #[test]

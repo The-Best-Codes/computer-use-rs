@@ -39,7 +39,7 @@ use super::{WinResultExt as _, rect_from};
 use crate::element::{Action, ElementData, ElementStates, RawNode};
 use crate::error::{Error, Result};
 use crate::geometry::Point;
-use crate::text::char_offset;
+use crate::text::utf16_offset;
 
 const PROPERTIES: [UIA_PROPERTY_ID; 19] = [
     UIA_ControlTypePropertyId,
@@ -181,12 +181,13 @@ impl Uia {
             .ok()
             .filter(|f| com!(f.CurrentProcessId()).is_ok_and(|p| u32::try_from(p).is_ok_and(|p| p == pid)));
         let flagged = nodes.iter().rposition(|n| n.data.states.contains(ElementStates::FOCUSED));
-        let index = flagged.or_else(|| {
+        let index = (|| {
             let focused = focused.as_ref()?;
             nodes
                 .iter()
                 .position(|n| com!(self.automation.CompareElements(focused, &n.handle)).is_ok_and(BOOL::as_bool))
-        });
+        })()
+        .or(flagged);
         (index, focused.as_ref().and_then(selected_text))
     }
 }
@@ -553,7 +554,7 @@ pub(super) fn select_text(element: &IUIAutomationElement, value: &str, range: Ra
         return Err(Error::invalid(format!("{range:?} is not a valid range in the element's text")));
     }
     let to_units = |bytes: usize| {
-        i32::try_from(char_offset(value, bytes)).map_err(|_| Error::invalid("selection offset is too large"))
+        i32::try_from(utf16_offset(value, bytes)).map_err(|_| Error::invalid("selection offset is too large"))
     };
     let (start, end) = (to_units(range.start)?, to_units(range.end)?);
     let pattern = current::<IUIAutomationTextPattern>(element, UIA_TextPatternId)
