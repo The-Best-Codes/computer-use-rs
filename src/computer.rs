@@ -151,7 +151,6 @@ struct Session<H> {
 pub struct Computer<B: Backend> {
     backend: B,
     sessions: HashMap<String, Session<B::Handle>>,
-    aliases: HashMap<String, String>,
     delivery: Delivery,
     settle_delay: Duration,
 }
@@ -182,13 +181,7 @@ impl<B: Backend> Computer<B> {
     /// Creates a session over a custom backend.
     #[must_use]
     pub fn with_backend(backend: B) -> Self {
-        Self {
-            backend,
-            sessions: HashMap::new(),
-            aliases: HashMap::new(),
-            delivery: Delivery::Background,
-            settle_delay: Duration::ZERO,
-        }
+        Self { backend, sessions: HashMap::new(), delivery: Delivery::Background, settle_delay: Duration::ZERO }
     }
 
     /// Sets the default input delivery for synthesized events.
@@ -241,10 +234,10 @@ impl<B: Backend> Computer<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::AppNotFound`] when nothing matches.
+    /// Returns [`Error::AppNotFound`] when nothing matches, or [`Error::AmbiguousApp`] when several
+    /// running apps match equally well.
     pub fn resolve_app(&self, query: &str) -> Result<AppInfo> {
-        let apps = self.backend.list_apps()?;
-        app::best_match(&apps, query).cloned().ok_or_else(|| Error::AppNotFound(query.to_owned()))
+        app::resolve(&self.backend.list_apps()?, query)
     }
 
     /// Captures the app's current window, replacing any earlier state (and element indexes)
@@ -283,7 +276,7 @@ impl<B: Backend> Computer<B> {
             captured_at: SystemTime::now(),
             notes: capture.notes,
         };
-        let key = self.remember(app, &state.app);
+        let key = state.app.pid.map_or_else(|| state.app.reference().to_lowercase(), |pid| format!("pid:{pid}"));
         let session = Session { state, handles, window };
         Ok(&self.sessions.entry(key).insert_entry(session).into_mut().state)
     }
@@ -307,16 +300,14 @@ impl<B: Backend> Computer<B> {
 
     /// Discards the remembered state of one app.
     pub fn forget(&mut self, app: &str) {
-        if let Some(key) = self.aliases.remove(&alias_key(app)) {
+        if let Ok(key) = self.session_key(app) {
             self.sessions.remove(&key);
-            self.aliases.retain(|_, v| *v != key);
         }
     }
 
     /// Discards all remembered state.
     pub fn clear(&mut self) {
         self.sessions.clear();
-        self.aliases.clear();
     }
 
     /// Finds elements in the app's current window without taking a screenshot.
@@ -620,13 +611,18 @@ impl<B: Backend> Computer<B> {
         let windows = self.backend.list_windows(app)?;
         let titled = |w: &&WindowInfo| w.id.is_some() && w.title.is_some();
         let lower = |w: &WindowInfo| w.title.as_deref().unwrap_or_default().to_lowercase();
-        windows
-            .iter()
-            .filter(titled)
-            .find(|w| lower(w) == wanted)
-            .or_else(|| windows.iter().filter(titled).find(|w| lower(w).contains(&wanted)))
-            .and_then(|w| w.id)
-            .ok_or_else(|| Error::WindowNotFound(format!("{} (no window titled {title:?})", app.name)))
+        let mut matches: Vec<&WindowInfo> = windows.iter().filter(titled).filter(|w| lower(w) == wanted).collect();
+        if matches.is_empty() {
+            matches = windows.iter().filter(titled).filter(|w| lower(w).contains(&wanted)).collect();
+        }
+        match matches.as_slice() {
+            [] => Err(Error::WindowNotFound(format!("{} (no window titled {title:?})", app.name))),
+            [window] => window.id.ok_or_else(|| Error::WindowNotFound(app.name.clone())),
+            _ => Err(Error::AmbiguousWindow {
+                title: title.to_owned(),
+                candidates: matches.into_iter().cloned().collect(),
+            }),
+        }
     }
 
     fn running_app(&self, query: &str, launch: bool) -> Result<AppInfo> {
@@ -641,35 +637,40 @@ impl<B: Backend> Computer<B> {
     }
 
     fn input_context(&self, app: &str) -> Result<(AppInfo, Option<WindowInfo>)> {
-        if let Ok(session) = self.session_for(app) {
-            return Ok((session.state.app.clone(), Some(session.state.window.clone())));
+        match self.session_for(app) {
+            Ok(session) => Ok((session.state.app.clone(), Some(session.state.window.clone()))),
+            Err(Error::NoAppState(_)) => Ok((self.running_app(app, false)?, None)),
+            Err(error) => Err(error),
         }
-        Ok((self.running_app(app, false)?, None))
     }
 
-    fn remember(&mut self, query: &str, info: &AppInfo) -> String {
-        let key = info.pid.map_or_else(|| info.reference().to_lowercase(), |pid| format!("pid:{pid}"));
-        self.aliases.insert(alias_key(query), key.clone());
-        self.aliases.insert(alias_key(info.reference()), key.clone());
-        self.aliases.insert(alias_key(&info.name), key.clone());
-        if let Some(pid) = info.pid {
-            self.aliases.insert(format!("pid:{pid}"), key.clone());
+    /// The observed app that best matches `app`; several equally good matches are ambiguous.
+    fn session_key(&self, app: &str) -> Result<String> {
+        let mut matches: Vec<_> = self
+            .sessions
+            .iter()
+            .filter_map(|(key, s)| Some((s.state.app.match_score(app)?, key, &s.state.app)))
+            .collect();
+        matches.sort_by_key(|(score, _, info)| (*score, info.pid));
+        let best: Vec<_> = matches.iter().take_while(|(score, ..)| *score == matches[0].0).collect();
+        match best.as_slice() {
+            [] => Err(Error::NoAppState(app.to_owned())),
+            [(_, key, _)] => Ok((*key).clone()),
+            _ => Err(Error::AmbiguousApp {
+                query: app.to_owned(),
+                candidates: best.iter().map(|(_, _, info)| (*info).clone()).collect(),
+            }),
         }
-        key
     }
 
     fn session_for(&self, app: &str) -> Result<&Session<B::Handle>> {
-        self.aliases
-            .get(&alias_key(app))
-            .and_then(|key| self.sessions.get(key))
-            .ok_or_else(|| Error::NoAppState(app.to_owned()))
+        let key = self.session_key(app)?;
+        Ok(&self.sessions[&key])
     }
 
     fn session_for_mut(&mut self, app: &str) -> Result<&mut Session<B::Handle>> {
-        self.aliases
-            .get(&alias_key(app))
-            .and_then(|key| self.sessions.get_mut(key))
-            .ok_or_else(|| Error::NoAppState(app.to_owned()))
+        let key = self.session_key(app)?;
+        self.sessions.get_mut(&key).ok_or_else(|| Error::NoAppState(app.to_owned()))
     }
 
     fn settle(&self) {
@@ -677,10 +678,6 @@ impl<B: Backend> Computer<B> {
             thread::sleep(self.settle_delay);
         }
     }
-}
-
-fn alias_key(query: &str) -> String {
-    query.trim().to_lowercase()
 }
 
 fn element<'a, H>(session: &'a Session<H>, app: &str, index: usize) -> Result<&'a Element> {

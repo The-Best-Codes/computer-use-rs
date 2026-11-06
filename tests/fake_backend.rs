@@ -26,6 +26,8 @@ enum Call {
 struct Fake {
     calls: RefCell<Vec<Call>>,
     requests: RefCell<Vec<CaptureRequest>>,
+    /// Adds a second `Editor` process and a second `Doc` window.
+    twins: bool,
 }
 
 const WINDOW: Rect = Rect::new(100.0, 50.0, 400.0, 300.0);
@@ -43,17 +45,25 @@ impl Backend for Fake {
     type Handle = usize;
 
     fn list_apps(&self) -> Result<Vec<AppInfo>> {
-        Ok(vec![
+        let mut apps = vec![
             AppInfo::new("Editor").with_bundle_id("com.example.editor").with_pid(42),
             AppInfo::new("Viewer").with_bundle_id("com.example.viewer"),
-        ])
+        ];
+        if self.twins {
+            apps.push(AppInfo::new("Editor").with_bundle_id("com.example.editor").with_pid(43));
+        }
+        Ok(apps)
     }
 
     fn list_windows(&self, _app: &AppInfo) -> Result<Vec<WindowInfo>> {
-        Ok(vec![
+        let mut windows = vec![
             WindowInfo::new(Some(7), Some("Doc".into()), WINDOW),
             WindowInfo::new(Some(8), Some("Inspector".into()), INSPECTOR),
-        ])
+        ];
+        if self.twins {
+            windows.push(WindowInfo::new(Some(9), Some("Doc".into()), WINDOW));
+        }
+        Ok(windows)
     }
 
     fn capture(&self, app: &AppInfo, request: &CaptureRequest) -> Result<Capture<usize>> {
@@ -360,5 +370,23 @@ fn scroll_at_points_and_elements() -> Result<()> {
     );
     assert!(computer.scroll_at("Editor", ClickTarget::Pixel { x: 900.0, y: 0.0 }, ScrollDirection::Up, 1.0).is_err());
     assert!(computer.scroll_at("Editor", ClickTarget::Pixel { x: 1.0, y: 1.0 }, ScrollDirection::Up, -1.0).is_err());
+    Ok(())
+}
+
+#[test]
+fn same_named_apps_and_windows_are_not_guessed() -> Result<()> {
+    let mut computer = Computer::with_backend(Fake { twins: true, ..Fake::default() });
+    let options = CaptureOptions::default();
+    assert!(matches!(computer.get_app_state("Editor", &options), Err(Error::AmbiguousApp { .. })));
+
+    computer.get_app_state("pid:42", &options)?;
+    computer.click("Editor", ClickTarget::Element(1), ClickOptions::default())?;
+    computer.get_app_state("pid:43", &options)?;
+    let click = computer.click("Editor", ClickTarget::Element(1), ClickOptions::default());
+    assert!(matches!(click, Err(Error::AmbiguousApp { .. })));
+    assert!(computer.state("pid:42").is_some());
+
+    let doc = CaptureOptions::default().window(WindowSelector::Title("doc".into()));
+    assert!(matches!(computer.get_app_state("pid:42", &doc), Err(Error::AmbiguousWindow { .. })));
     Ok(())
 }

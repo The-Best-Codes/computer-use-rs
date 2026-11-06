@@ -1,5 +1,8 @@
 use std::fmt;
 
+use crate::app::AppInfo;
+use crate::state::WindowInfo;
+
 /// Convenience alias used throughout the crate.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -29,6 +32,24 @@ pub enum Error {
     /// No running or installed app matched the query.
     #[error("app not found: {0}")]
     AppNotFound(String),
+
+    /// Several running apps matched the query equally well.
+    #[error("{query:?} matches more than one running app: {}", list(candidates, |a| format!("{} (pid {})", a.name, a.pid.unwrap_or_default())))]
+    AmbiguousApp {
+        /// The query.
+        query: String,
+        /// The matching apps.
+        candidates: Vec<AppInfo>,
+    },
+
+    /// Several of an app's windows matched a title.
+    #[error("{title:?} matches more than one window: {}", list(candidates, |w| format!("{:?} (id {})", w.title.as_deref().unwrap_or_default(), w.id.unwrap_or_default())))]
+    AmbiguousWindow {
+        /// The title.
+        title: String,
+        /// The matching windows.
+        candidates: Vec<WindowInfo>,
+    },
 
     /// The app is running but has no window that can be observed.
     #[error("no usable window for app {0}")]
@@ -93,4 +114,8 @@ impl Error {
     pub(crate) fn action(message: impl Into<String>) -> Self {
         Self::ActionFailed(message.into())
     }
+}
+
+fn list<T>(items: &[T], describe: impl Fn(&T) -> String) -> String {
+    items.iter().map(describe).collect::<Vec<_>>().join(", ")
 }

@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::error::{Error, Result};
+
 /// An application that is running or installed.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
@@ -130,11 +132,19 @@ impl AppInfo {
     }
 }
 
-pub(crate) fn best_match<'a>(apps: &'a [AppInfo], query: &str) -> Option<&'a AppInfo> {
-    apps.iter()
-        .filter_map(|app| app.match_score(query).map(|score| (score, !app.is_running, app)))
-        .min_by_key(|(score, not_running, _)| (*score, *not_running))
-        .map(|(_, _, app)| app)
+/// The best match for `query`, or [`Error::AmbiguousApp`] when several running apps tie.
+pub(crate) fn resolve(apps: &[AppInfo], query: &str) -> Result<AppInfo> {
+    let mut matches: Vec<_> = apps.iter().filter_map(|app| Some((app.match_score(query)?, app))).collect();
+    matches.sort_by_key(|(score, app)| (*score, !app.is_running, !app.is_active, app.pid));
+    let Some(&(best, first)) = matches.first() else {
+        return Err(Error::AppNotFound(query.to_owned()));
+    };
+    let tied: Vec<AppInfo> =
+        matches.iter().filter(|(score, app)| *score == best && app.is_running).map(|(_, app)| (*app).clone()).collect();
+    if tied.len() > 1 {
+        return Err(Error::AmbiguousApp { query: query.to_owned(), candidates: tied });
+    }
+    Ok(first.clone())
 }
 
 #[cfg(test)]
@@ -149,6 +159,19 @@ mod tests {
             AppInfo::new("TextEdit").with_bundle_id("com.apple.TextEdit").with_pid(42),
             AppInfo::new("Safari").with_bundle_id("com.apple.Safari").with_pid(7),
         ]
+    }
+
+    fn best_match<'a>(apps: &'a [AppInfo], query: &str) -> Option<&'a AppInfo> {
+        apps.iter().find(|app| resolve(apps, query).is_ok_and(|best| best == **app))
+    }
+
+    #[test]
+    fn same_named_running_apps_are_ambiguous() {
+        let apps = vec![AppInfo::new("Code").with_pid(2), AppInfo::new("Code").with_pid(1).with_window_title("a.rs")];
+        let Err(Error::AmbiguousApp { candidates, .. }) = resolve(&apps, "code") else { panic!("expected ambiguity") };
+        assert_eq!(candidates.iter().filter_map(|a| a.pid).collect::<Vec<_>>(), vec![1, 2]);
+        assert_eq!(resolve(&apps, "pid:2").ok().and_then(|a| a.pid), Some(2));
+        assert_eq!(resolve(&apps, "a.rs").ok().and_then(|a| a.pid), Some(1));
     }
 
     #[test]
