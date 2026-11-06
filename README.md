@@ -33,19 +33,23 @@ fn main() -> computer_use::Result<()> {
 
 `Computer` is the main entry point:
 
-| Method                     | Does                                                                                                                                         |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `list_apps`                | Running apps (frontmost first), then installed apps                                                                                          |
-| `get_app_state`            | Captures the app's window: element tree, focus, selection, screenshot. Launches the app in the background if needed                          |
-| `query`                    | Finds elements by text and/or role without taking a screenshot                                                                               |
-| `click`                    | Clicks an element (by accessibility action when that's equivalent) or a screenshot pixel. Supports left/right/middle buttons and multi-click |
-| `perform_secondary_action` | Invokes a named action such as `Show Menu`, `Raise` or `Increment`                                                                           |
-| `scroll`                   | Scrolls an element by pages (fractions allowed)                                                                                              |
-| `drag`                     | Drags between two screenshot pixels                                                                                                          |
-| `type_text`                | Types literal text, inserting through accessibility when possible                                                                            |
-| `press_key`                | Presses xdotool-style chords such as `super+c`, `ctrl+shift+Tab` or `KP_0`                                                                   |
-| `set_value`                | Writes the value of a settable element                                                                                                       |
-| `select_text`              | Selects text inside an element, or puts the caret before or after it                                                                         |
+| Method                     | Does                                                                                                                                             |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `list_apps`                | Running apps (frontmost first), then installed apps                                                                                              |
+| `list_windows`             | The app's windows, to pick one with `CaptureOptions::window` (by ID or title)                                                                    |
+| `get_app_state`            | Captures the app's window: element tree, focus, selection, screenshot, and optionally the menu bar. Launches the app in the background if needed |
+| `query`                    | Finds elements by text and/or role without taking a screenshot                                                                                   |
+| `click`                    | Clicks an element (by accessibility action when that's equivalent), a screenshot pixel, or a screen point. Left/right/middle, multi-click        |
+| `perform_secondary_action` | Invokes a named action such as `Show Menu`, `Raise` or `Increment`                                                                               |
+| `scroll` / `scroll_at`     | Scrolls an element, a screenshot pixel or a screen point by pages (fractions allowed)                                                            |
+| `drag` / `drag_screen`     | Drags between two screenshot pixels, or two screen points                                                                                        |
+| `type_text`                | Types literal text, inserting through accessibility when possible                                                                                |
+| `press_key`                | Presses xdotool-style chords such as `super+c`, `ctrl+shift+Tab` or `KP_0`                                                                       |
+| `set_value`                | Writes the value of a settable element                                                                                                           |
+| `select_text`              | Selects text inside an element, or puts the caret before or after it                                                                             |
+
+`Computer<NativeBackend>` is `Send`, so it can live behind a mutex and be used from
+`spawn_blocking` or any worker thread.
 
 The building blocks are public as well. `AppState` and `Element` are plain data.
 `keys::KeyChord` is an xdotool key parser. `text::TextSelection` resolves text ranges.

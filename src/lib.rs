@@ -5,11 +5,14 @@
 //! AI agents. It provides:
 //!
 //! - [`Computer`]: a session for observing and acting on apps:
-//!   [`list_apps`](Computer::list_apps), [`get_app_state`](Computer::get_app_state),
-//!   [`click`](Computer::click), [`perform_secondary_action`](Computer::perform_secondary_action),
-//!   [`scroll`](Computer::scroll), [`drag`](Computer::drag), [`type_text`](Computer::type_text),
+//!   [`list_apps`](Computer::list_apps), [`list_windows`](Computer::list_windows),
+//!   [`get_app_state`](Computer::get_app_state), [`click`](Computer::click),
+//!   [`perform_secondary_action`](Computer::perform_secondary_action), [`scroll`](Computer::scroll),
+//!   [`scroll_at`](Computer::scroll_at), [`drag`](Computer::drag),
+//!   [`drag_screen`](Computer::drag_screen), [`type_text`](Computer::type_text),
 //!   [`press_key`](Computer::press_key), [`set_value`](Computer::set_value),
 //!   [`select_text`](Computer::select_text) and [`query`](Computer::query).
+//!   With the native backend it is `Send`, so it can be shared across threads behind a mutex.
 //! - [`AppState`]: a captured window with an indexed element tree, a PNG [`Screenshot`], and a
 //!   compact [text rendering](AppState::render) for logging, diffing or prompts.
 //! - [`Backend`]: the OS abstraction. [`NativeBackend`] is the implementation for the current
@@ -78,9 +81,9 @@ pub use platform::NativeBackend;
 #[cfg(target_os = "linux")]
 pub use platform::linux::{LinuxBackend, LinuxElement};
 #[cfg(target_os = "macos")]
-pub use platform::macos::MacBackend;
+pub use platform::macos::{MacBackend, MacElement};
 #[cfg(target_os = "windows")]
-pub use platform::windows::WindowsBackend;
+pub use platform::windows::{WindowsBackend, WindowsElement};
 pub use screenshot::{RawImage, Screenshot};
-pub use state::{AppState, CaptureOptions, ElementQuery, WindowInfo};
+pub use state::{AppState, CaptureOptions, ElementQuery, WindowInfo, WindowSelector};
 pub use text::{SelectionMode, TextSelection};

@@ -7,7 +7,7 @@ use computer_use::keys::{Key, KeyChord, Modifiers};
 use computer_use::{
     Action, AppInfo, Backend, Capture, CaptureOptions, CaptureRequest, ClickMethod, ClickOptions, ClickOutcome,
     ClickTarget, Computer, Delivery, ElementData, ElementQuery, ElementStates, Error, InputTarget, MouseButton, Point,
-    RawImage, RawNode, Rect, Result, ScrollDirection, SelectionMode, TextSelection, WindowInfo,
+    RawImage, RawNode, Rect, Result, ScrollDirection, SelectionMode, TextSelection, WindowInfo, WindowSelector,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -25,9 +25,11 @@ enum Call {
 #[derive(Default)]
 struct Fake {
     calls: RefCell<Vec<Call>>,
+    requests: RefCell<Vec<CaptureRequest>>,
 }
 
 const WINDOW: Rect = Rect::new(100.0, 50.0, 400.0, 300.0);
+const INSPECTOR: Rect = Rect::new(600.0, 50.0, 200.0, 300.0);
 const DOC: &str = "one two one three";
 
 fn node(parent: Option<usize>, role: &str, title: Option<&str>, frame: Rect) -> RawNode<usize> {
@@ -47,8 +49,21 @@ impl Backend for Fake {
         ])
     }
 
-    fn capture(&self, _app: &AppInfo, request: &CaptureRequest) -> Result<Capture<usize>> {
-        let mut capture = Capture::new(WindowInfo::new(Some(7), Some("Doc".into()), WINDOW));
+    fn list_windows(&self, _app: &AppInfo) -> Result<Vec<WindowInfo>> {
+        Ok(vec![
+            WindowInfo::new(Some(7), Some("Doc".into()), WINDOW),
+            WindowInfo::new(Some(8), Some("Inspector".into()), INSPECTOR),
+        ])
+    }
+
+    fn capture(&self, app: &AppInfo, request: &CaptureRequest) -> Result<Capture<usize>> {
+        self.requests.borrow_mut().push(*request);
+        let window = match request.window {
+            None | Some(7) => WindowInfo::new(Some(7), Some("Doc".into()), WINDOW),
+            Some(8) => WindowInfo::new(Some(8), Some("Inspector".into()), INSPECTOR),
+            Some(_) => return Err(Error::WindowNotFound(app.name.clone())),
+        };
+        let mut capture = Capture::new(window);
         if request.include_tree {
             let mut nodes = vec![
                 node(None, "window", Some("Doc"), WINDOW),
@@ -266,5 +281,84 @@ fn list_apps_puts_running_apps_first() -> Result<()> {
     let computer = Computer::with_backend(Fake::default());
     let names: Vec<_> = computer.list_apps()?.into_iter().map(|a| a.name).collect();
     assert_eq!(names, vec!["Editor", "Viewer"]);
+    Ok(())
+}
+
+fn last_request(computer: &Computer<Fake>) -> Result<CaptureRequest> {
+    computer.backend().requests.borrow().last().copied().ok_or(Error::StateUnavailable("no capture".into()))
+}
+
+#[test]
+fn selects_windows_by_id_or_title() -> Result<()> {
+    let mut computer = Computer::with_backend(Fake::default());
+    let titles: Vec<_> = computer.list_windows("Editor")?.into_iter().filter_map(|w| w.title).collect();
+    assert_eq!(titles, vec!["Doc", "Inspector"]);
+
+    let state =
+        computer.get_app_state("Editor", &CaptureOptions::default().window(WindowSelector::Title("insp".into())))?;
+    assert_eq!(state.window.id, Some(8));
+    assert_eq!(last_request(&computer)?.window, Some(8));
+
+    // A later query stays on the chosen window.
+    computer.query("Editor", &ElementQuery::role("button"), 100)?;
+    assert_eq!(last_request(&computer)?.window, Some(8));
+
+    let doc =
+        computer.get_app_state("Editor", &CaptureOptions::default().window(WindowSelector::Title("DOC".into())))?;
+    assert_eq!(doc.window.id, Some(7));
+    computer.get_app_state("Editor", &CaptureOptions::default())?;
+    computer.query("Editor", &ElementQuery::role("button"), 100)?;
+    assert_eq!(last_request(&computer)?.window, None, "a default capture resets the choice");
+
+    let missing = CaptureOptions::default().window(WindowSelector::Title("nope".into()));
+    assert!(matches!(computer.get_app_state("Editor", &missing), Err(Error::WindowNotFound(_))));
+    let unknown_id = CaptureOptions::default().window(WindowSelector::Id(99));
+    assert!(matches!(computer.get_app_state("Editor", &unknown_id), Err(Error::WindowNotFound(_))));
+    Ok(())
+}
+
+#[test]
+fn passes_menu_bar_option_to_backend() -> Result<()> {
+    let mut computer = computer()?;
+    assert!(!last_request(&computer)?.include_menu_bar);
+    computer.get_app_state("Editor", &CaptureOptions::default().include_menu_bar(true))?;
+    assert!(last_request(&computer)?.include_menu_bar);
+    Ok(())
+}
+
+#[test]
+fn screen_point_actions_need_no_capture() -> Result<()> {
+    let mut computer = Computer::with_backend(Fake::default());
+    let at = ClickTarget::Screen { x: 10.0, y: 20.0 };
+    computer.click("Editor", at, ClickOptions::default())?;
+    computer.drag_screen("Editor", Point::new(1.0, 2.0), Point::new(3.0, 4.0))?;
+    computer.scroll_at("Editor", at, ScrollDirection::Down, 1.0)?;
+    assert_eq!(
+        calls(&computer),
+        vec![
+            Call::Click(Point::new(10.0, 20.0), MouseButton::Left, 1, Delivery::Background),
+            Call::Drag(Point::new(1.0, 2.0), Point::new(3.0, 4.0)),
+            Call::Scroll(Point::new(10.0, 20.0), 0.0, 400.0),
+        ]
+    );
+    let ax_only = ClickOptions::default().method(ClickMethod::Accessibility);
+    assert!(computer.click("Editor", at, ax_only).is_err());
+    assert!(computer.click("Editor", ClickTarget::Screen { x: f64::NAN, y: 0.0 }, ClickOptions::default()).is_err());
+    assert!(computer.click("Viewer", at, ClickOptions::default()).is_err(), "the app must be running");
+    Ok(())
+}
+
+#[test]
+fn scroll_at_points_and_elements() -> Result<()> {
+    let mut computer = computer()?;
+    // Pixel (400, 300) is screen (300, 200); a page is 80% of the 300-point-high window.
+    computer.scroll_at("Editor", ClickTarget::Pixel { x: 400.0, y: 300.0 }, ScrollDirection::Up, 0.5)?;
+    computer.scroll_at("Editor", ClickTarget::Element(2), ScrollDirection::Down, 1.0)?;
+    assert_eq!(
+        calls(&computer),
+        vec![Call::Scroll(Point::new(300.0, 200.0), 0.0, -120.0), Call::Action(3, "AXScrollDownByPage".into())]
+    );
+    assert!(computer.scroll_at("Editor", ClickTarget::Pixel { x: 900.0, y: 0.0 }, ScrollDirection::Up, 1.0).is_err());
+    assert!(computer.scroll_at("Editor", ClickTarget::Pixel { x: 1.0, y: 1.0 }, ScrollDirection::Up, -1.0).is_err());
     Ok(())
 }

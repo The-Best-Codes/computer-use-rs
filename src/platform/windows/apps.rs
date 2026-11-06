@@ -192,6 +192,11 @@ pub(super) fn main_window(pid: u32) -> Option<HWND> {
         .or_else(|| candidates.iter().copied().max_by_key(area))
 }
 
+/// The process's visible top-level windows, front to back.
+pub(super) fn app_windows(pid: u32) -> Vec<HWND> {
+    top_level_windows().into_iter().filter(|&h| window_pid(h) == pid && is_visible_window(h)).collect()
+}
+
 pub(super) fn window_frame(hwnd: HWND) -> Option<RECT> {
     let mut rect = RECT::default();
     // SAFETY: `rect` is a writable RECT of exactly the size passed, as this attribute requires.

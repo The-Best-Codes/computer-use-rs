@@ -10,7 +10,9 @@ use crate::screenshot::Screenshot;
 #[derive(Debug, Clone, PartialEq, Default)]
 #[non_exhaustive]
 pub struct WindowInfo {
-    /// Platform window ID (`CGWindowID`, `HWND`, X11 window), when known.
+    /// Platform window ID, when known: the `CGWindowID` on macOS, the `HWND` on Windows, and an
+    /// opaque ID derived from the window's accessibility object on Linux. Pass it to
+    /// [`WindowSelector::Id`] to capture this window again.
     pub id: Option<u64>,
     /// Window title.
     pub title: Option<String>,
@@ -26,9 +28,23 @@ impl WindowInfo {
     }
 }
 
+/// Which of an app's windows to capture.
+///
+/// [`Computer::list_windows`](crate::Computer::list_windows) lists the candidates.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum WindowSelector {
+    /// A [`WindowInfo::id`].
+    Id(u64),
+    /// A window title, matched case-insensitively: an exact match wins, then the first window
+    /// whose title contains it.
+    Title(String),
+}
+
 /// Limits and toggles for [`Computer::get_app_state`](crate::Computer::get_app_state).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
+#[allow(clippy::struct_excessive_bools)] // independent toggles, each with a builder
 pub struct CaptureOptions {
     /// Walk the accessibility tree. Disabling this invalidates element indexes.
     pub include_tree: bool,
@@ -44,6 +60,13 @@ pub struct CaptureOptions {
     pub max_screenshot_dimension: Option<u32>,
     /// Launch the app (without activating it) if it is installed but not running.
     pub launch_if_needed: bool,
+    /// The window to capture; `None` picks the focused or main window.
+    pub window: Option<WindowSelector>,
+    /// Also capture the app's menu bar, as a second root after the window's tree.
+    ///
+    /// Only macOS keeps the menu bar outside the window; on Windows and Linux it is already
+    /// part of the window's tree, so this has no effect there.
+    pub include_menu_bar: bool,
 }
 
 impl Default for CaptureOptions {
@@ -56,6 +79,8 @@ impl Default for CaptureOptions {
             max_depth: 64,
             max_screenshot_dimension: Some(1280),
             launch_if_needed: true,
+            window: None,
+            include_menu_bar: false,
         }
     }
 }
@@ -107,6 +132,20 @@ impl CaptureOptions {
     #[must_use]
     pub const fn launch_if_needed(mut self, yes: bool) -> Self {
         self.launch_if_needed = yes;
+        self
+    }
+
+    /// Sets [`window`](Self::window).
+    #[must_use]
+    pub fn window(mut self, window: WindowSelector) -> Self {
+        self.window = Some(window);
+        self
+    }
+
+    /// Sets [`include_menu_bar`](Self::include_menu_bar).
+    #[must_use]
+    pub const fn include_menu_bar(mut self, yes: bool) -> Self {
+        self.include_menu_bar = yes;
         self
     }
 }

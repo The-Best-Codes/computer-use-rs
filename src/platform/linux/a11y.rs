@@ -107,8 +107,25 @@ pub(crate) struct MainWindow {
     pub(crate) info: WindowInfo,
 }
 
-pub(crate) fn main_window(conn: &Connection, app: &LinuxElement, app_name: &str) -> Result<MainWindow> {
-    let mut showing = None;
+/// An opaque, stable ID for a window's accessible object, used as its [`WindowInfo::id`].
+fn window_id(element: &LinuxElement) -> u64 {
+    // FNV-1a: stable across runs and Rust versions, unlike `DefaultHasher`.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in element.bus_name().bytes().chain([0]).chain(element.object_path().bytes()) {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    hash
+}
+
+struct Candidate {
+    window: MainWindow,
+    active: bool,
+}
+
+/// The app's top-level windows that are active or showing, in the app's child order.
+fn windows(conn: &Connection, app: &LinuxElement) -> Result<Vec<Candidate>> {
+    let mut out = Vec::new();
     for child in children(conn, app)? {
         let Ok(accessible) = proxy::<AccessibleProxyBlocking<'_>>(conn, &child) else { continue };
         let role = accessible.get_role_name().unwrap_or_default();
@@ -117,18 +134,43 @@ pub(crate) fn main_window(conn: &Connection, app: &LinuxElement, app_name: &str)
             continue;
         }
         let Ok(states) = accessible.get_state() else { continue };
-        let candidate = || {
-            let title = accessible.name().ok().filter(|s| !s.is_empty());
-            MainWindow { element: child.clone(), info: WindowInfo::new(None, title, frame.unwrap_or_default()) }
-        };
-        if states.contains(State::Active) {
-            return Ok(candidate());
+        let active = states.contains(State::Active);
+        if !active && !states.contains(State::Showing) {
+            continue;
         }
-        if showing.is_none() && states.contains(State::Showing) {
-            showing = Some(candidate());
-        }
+        let title = accessible.name().ok().filter(|s| !s.is_empty());
+        let info = WindowInfo::new(Some(window_id(&child)), title, frame.unwrap_or_default());
+        drop(accessible);
+        out.push(Candidate { window: MainWindow { element: child, info }, active });
     }
-    showing.ok_or_else(|| Error::WindowNotFound(app_name.to_owned()))
+    Ok(out)
+}
+
+/// The app's windows, the active one first.
+pub(crate) fn list_windows(conn: &Connection, app: &LinuxElement) -> Result<Vec<WindowInfo>> {
+    let mut found = windows(conn, app)?;
+    found.sort_by_key(|c| !c.active);
+    Ok(found.into_iter().map(|c| c.window.info).collect())
+}
+
+/// The window with [`WindowInfo::id`] `id`, or the active (else first showing) window.
+pub(crate) fn main_window(
+    conn: &Connection,
+    app: &LinuxElement,
+    app_name: &str,
+    id: Option<u64>,
+) -> Result<MainWindow> {
+    let found = windows(conn, app)?;
+    let chosen = if let Some(id) = id {
+        found
+            .into_iter()
+            .find(|c| c.window.info.id == Some(id))
+            .ok_or_else(|| Error::WindowNotFound(format!("{app_name} (no window with ID {id})")))?
+    } else {
+        let index = found.iter().position(|c| c.active).unwrap_or(0);
+        found.into_iter().nth(index).ok_or_else(|| Error::WindowNotFound(app_name.to_owned()))?
+    };
+    Ok(chosen.window)
 }
 
 pub(crate) fn has_active_window(conn: &Connection, app: &LinuxElement) -> bool {

@@ -146,13 +146,33 @@ pub struct CaptureRequest {
     pub max_nodes: usize,
     /// Maximum depth to visit.
     pub max_depth: usize,
+    /// Capture the window with this [`WindowInfo::id`] instead of the focused or main window.
+    /// Backends that cannot honor it must fail rather than capture another window.
+    pub window: Option<u64>,
+    /// Also walk the app's menu bar when it lives outside the window (macOS). Its nodes follow
+    /// the window's, with `parent: None` on the menu bar itself. Counts toward `max_nodes`.
+    pub include_menu_bar: bool,
 }
 
 impl CaptureRequest {
     /// Creates a request.
     #[must_use]
     pub const fn new(include_tree: bool, include_screenshot: bool, max_nodes: usize, max_depth: usize) -> Self {
-        Self { include_tree, include_screenshot, max_nodes, max_depth }
+        Self { include_tree, include_screenshot, max_nodes, max_depth, window: None, include_menu_bar: false }
+    }
+
+    /// Sets [`window`](Self::window).
+    #[must_use]
+    pub const fn with_window(mut self, window: Option<u64>) -> Self {
+        self.window = window;
+        self
+    }
+
+    /// Sets [`include_menu_bar`](Self::include_menu_bar).
+    #[must_use]
+    pub const fn with_menu_bar(mut self, yes: bool) -> Self {
+        self.include_menu_bar = yes;
+        self
     }
 }
 
@@ -226,11 +246,25 @@ pub trait Backend {
         self.permissions()
     }
 
-    /// Captures the app's current window.
+    /// The app's windows, front to back where the platform knows the order. Each one with an
+    /// [`id`](WindowInfo::id) can be passed back as [`CaptureRequest::window`].
+    ///
+    /// Unsupported by default.
     ///
     /// # Errors
     ///
-    /// Fails if the app has no usable window or permissions are missing.
+    /// Fails if the app is not running or permissions are missing.
+    fn list_windows(&self, app: &AppInfo) -> Result<Vec<WindowInfo>> {
+        let _ = app;
+        Err(Error::Unsupported("listing windows".into()))
+    }
+
+    /// Captures the app's current window, or the one [`CaptureRequest::window`] names.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the app has no usable window (or not the requested one) or permissions are
+    /// missing.
     fn capture(&self, app: &AppInfo, request: &CaptureRequest) -> Result<Capture<Self::Handle>>;
 
     /// Invokes a named accessibility action (as listed in [`Action::name`](crate::Action::name)).

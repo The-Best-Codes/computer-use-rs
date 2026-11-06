@@ -10,13 +10,16 @@ mod window;
 
 use std::ops::Range;
 
-use objc2_application_services::{AXIsProcessTrusted, AXIsProcessTrustedWithOptions, kAXTrustedCheckOptionPrompt};
+use objc2_application_services::{
+    AXIsProcessTrusted, AXIsProcessTrustedWithOptions, AXUIElement, kAXTrustedCheckOptionPrompt,
+};
 use objc2_core_foundation::{CFBoolean, CFDictionary, CFNumber, CFRange, CFString, CFType};
 use objc2_core_graphics::{CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess};
 
 use self::ax::AxElement;
 use crate::app::AppInfo;
 use crate::backend::{Backend, Capture, CaptureRequest, Delivery, InputTarget, MouseButton, Permissions};
+use crate::element::RawNode;
 use crate::error::{Error, Permission, Result};
 use crate::geometry::Point;
 use crate::keys::KeyChord;
@@ -45,6 +48,34 @@ impl MacBackend {
     }
 }
 
+/// A live macOS accessibility element: the [`MacBackend`] handle type.
+///
+/// Unlike a bare `CFRetained<AXUIElement>`, it is `Send` and `Sync`, so a
+/// [`Computer`](crate::Computer) over [`MacBackend`] can move between threads.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MacElement(AxElement);
+
+#[allow(clippy::non_send_fields_in_send_ty)] // see the SAFETY comment
+// SAFETY: an AXUIElement is an immutable CoreFoundation reference to a remote element. CF
+// retain/release are atomic, and the Accessibility client API may be called from any thread:
+// every call is a synchronous request to the target process that touches no thread-local state.
+// The objc2 bindings leave it !Send only because they cannot know this about the type.
+unsafe impl Send for MacElement {}
+// SAFETY: as above; the element has no interior state that `&self` methods could race on.
+unsafe impl Sync for MacElement {}
+
+impl MacElement {
+    /// The underlying `AXUIElement`.
+    #[must_use]
+    pub fn as_ax(&self) -> &AXUIElement {
+        &self.0
+    }
+}
+
+fn wrap(nodes: Vec<RawNode<AxElement>>) -> Vec<RawNode<MacElement>> {
+    nodes.into_iter().map(|n| RawNode { handle: MacElement(n.handle), parent: n.parent, data: n.data }).collect()
+}
+
 fn require_accessibility() -> Result<()> {
     // SAFETY: AXIsProcessTrusted has no preconditions.
     if unsafe { AXIsProcessTrusted() } { Ok(()) } else { Err(Error::PermissionDenied(Permission::Accessibility)) }
@@ -55,7 +86,7 @@ fn pid_of(app: &AppInfo) -> Result<i32> {
 }
 
 impl Backend for MacBackend {
-    type Handle = AxElement;
+    type Handle = MacElement;
 
     fn list_apps(&self) -> Result<Vec<AppInfo>> {
         let mut apps = apps::running_apps();
@@ -94,7 +125,13 @@ impl Backend for MacBackend {
         Permissions::new(accessibility, screen)
     }
 
-    fn capture(&self, app: &AppInfo, request: &CaptureRequest) -> Result<Capture<AxElement>> {
+    fn list_windows(&self, app: &AppInfo) -> Result<Vec<WindowInfo>> {
+        require_accessibility()?;
+        let pid = pid_of(app)?;
+        Ok(window::list(&ax::application(pid), pid))
+    }
+
+    fn capture(&self, app: &AppInfo, request: &CaptureRequest) -> Result<Capture<MacElement>> {
         require_accessibility()?;
         let pid = pid_of(app)?;
         let app_element = ax::application(pid);
@@ -102,20 +139,32 @@ impl Backend for MacBackend {
         let _ = ax::set_bool(&app_element, "AXManualAccessibility", true);
 
         let mut notes = Vec::new();
-        let target = match window::main_window(&app_element, &app.name) {
-            Ok(target) => target,
-            // Some apps expose no AX window for a visible one; use the window server's geometry.
-            Err(Error::WindowNotFound(name)) => {
-                let server = window::server_main_window(pid).ok_or(Error::WindowNotFound(name))?;
-                notes.push("Accessibility exposes no window for this app; the tree is rooted at the app.".to_owned());
-                window::TargetWindow { element: app_element.clone(), frame: server.frame, title: server.title }
-            }
-            Err(e) => return Err(e),
+        let server_only = |server: window::ServerWindow, notes: &mut Vec<String>| {
+            notes.push("Accessibility exposes no window for this app; the tree is rooted at the app.".to_owned());
+            let id = server.id;
+            (window::TargetWindow { element: app_element.clone(), frame: server.frame, title: server.title }, Some(id))
         };
-        let window_id = skylight::get()
-            .window_id(&target.element)
-            .filter(|id| window::server_windows(pid).iter().any(|w| w.id == *id))
-            .or_else(|| window::window_id(pid, target.frame, target.title.as_deref()));
+        let (target, window_id) = match request.window {
+            Some(id) => match window::by_id(&app_element, pid, id, &app.name)? {
+                window::Selected::Ax(target) => {
+                    let id = u32::try_from(id).ok();
+                    (target, id)
+                }
+                window::Selected::ServerOnly(server) => server_only(server, &mut notes),
+            },
+            None => match window::main_window(&app_element, &app.name) {
+                Ok(target) => {
+                    let id = window::server_id(&target.element, pid, &window::server_windows(pid));
+                    (target, id)
+                }
+                // Some apps expose no AX window for a visible one; use the window server's geometry.
+                Err(Error::WindowNotFound(name)) => {
+                    let server = window::server_main_window(pid).ok_or(Error::WindowNotFound(name))?;
+                    server_only(server, &mut notes)
+                }
+                Err(e) => return Err(e),
+            },
+        };
         let mut capture = Capture::new(WindowInfo::new(window_id.map(u64::from), target.title.clone(), target.frame));
         capture.notes = notes;
 
@@ -123,9 +172,24 @@ impl Backend for MacBackend {
             let focused = ax::element(&app_element, "AXFocusedUIElement");
             let walk =
                 tree::walk(&target.element, target.frame, focused.as_ref(), request.max_nodes, request.max_depth);
-            capture.nodes = walk.nodes;
+            let mut raw = walk.nodes;
             capture.truncated = walk.truncated;
             capture.focused = walk.focused;
+            if request.include_menu_bar
+                && let Some(bar) = ax::element(&app_element, "AXMenuBar")
+            {
+                let base = raw.len();
+                let budget = request.max_nodes.saturating_sub(base);
+                let bar_frame = ax::frame(&bar).unwrap_or(target.frame);
+                let menu = tree::walk(&bar, bar_frame, focused.as_ref(), budget, request.max_depth);
+                capture.truncated |= menu.truncated;
+                capture.focused = capture.focused.or_else(|| menu.focused.map(|i| base + i));
+                raw.extend(menu.nodes.into_iter().map(|mut n| {
+                    n.parent = n.parent.map(|p| base + p);
+                    n
+                }));
+            }
+            capture.nodes = wrap(raw);
             capture.selected_text =
                 focused.as_ref().and_then(|f| ax::string(f, "AXSelectedText")).filter(|s| !s.is_empty());
         }
@@ -141,11 +205,12 @@ impl Backend for MacBackend {
         Ok(capture)
     }
 
-    fn perform_action(&self, element: &AxElement, action: &str) -> Result<()> {
-        ax::perform(element, action)
+    fn perform_action(&self, element: &MacElement, action: &str) -> Result<()> {
+        ax::perform(&element.0, action)
     }
 
-    fn set_value(&self, element: &AxElement, value: &str) -> Result<()> {
+    fn set_value(&self, element: &MacElement, value: &str) -> Result<()> {
+        let element = &element.0;
         if !ax::is_settable(element, "AXValue") {
             return Err(Error::action("this element's value is not settable"));
         }
@@ -158,11 +223,12 @@ impl Backend for MacBackend {
         }
     }
 
-    fn value(&self, element: &AxElement) -> Result<Option<String>> {
-        Ok(ax::string(element, "AXValue"))
+    fn value(&self, element: &MacElement) -> Result<Option<String>> {
+        Ok(ax::string(&element.0, "AXValue"))
     }
 
-    fn select_text(&self, element: &AxElement, value: &str, range: Range<usize>) -> Result<()> {
+    fn select_text(&self, element: &MacElement, value: &str, range: Range<usize>) -> Result<()> {
+        let element = &element.0;
         let start = utf16_offset(value, range.start);
         let len = utf16_offset(value, range.end) - start;
         let cf_range = CFRange::new(

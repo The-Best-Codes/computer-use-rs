@@ -18,6 +18,7 @@ use crate::backend::{Backend, Capture, CaptureRequest, InputTarget, MouseButton}
 use crate::error::Result;
 use crate::geometry::Point;
 use crate::keys::KeyChord;
+use crate::state::WindowInfo;
 
 /// A live AT-SPI accessible object: the owning app's bus name plus the object path.
 ///
@@ -80,9 +81,14 @@ impl Backend for LinuxBackend {
         apps::launch_app(&self.conn, &self.session, app)
     }
 
+    fn list_windows(&self, app: &AppInfo) -> Result<Vec<WindowInfo>> {
+        let root = apps::find_running(&self.conn, app)?;
+        a11y::list_windows(&self.conn, &root)
+    }
+
     fn capture(&self, app: &AppInfo, request: &CaptureRequest) -> Result<Capture<Self::Handle>> {
         let root = apps::find_running(&self.conn, app)?;
-        let window = a11y::main_window(&self.conn, &root, &app.name)?;
+        let window = a11y::main_window(&self.conn, &root, &app.name, request.window)?;
         let mut capture = Capture::new(window.info);
         if request.include_tree {
             let walk = a11y::walk(&self.conn, &window.element, request.max_nodes, request.max_depth)?;

@@ -6,10 +6,10 @@ use crate::app::{self, AppInfo};
 use crate::backend::{Backend, CaptureRequest, Delivery, InputTarget, MouseButton, Permissions, ScrollDirection};
 use crate::element::{Element, build_tree};
 use crate::error::{Error, Result};
-use crate::geometry::Point;
+use crate::geometry::{Point, Rect};
 use crate::keys::KeyChord;
 use crate::screenshot::Screenshot;
-use crate::state::{AppState, CaptureOptions, ElementQuery};
+use crate::state::{AppState, CaptureOptions, ElementQuery, WindowInfo, WindowSelector};
 use crate::text::TextSelection;
 
 /// What to click.
@@ -23,6 +23,13 @@ pub enum ClickTarget {
         /// Horizontal pixel.
         x: f64,
         /// Vertical pixel.
+        y: f64,
+    },
+    /// A point in screen coordinates (top-left origin). Needs no earlier capture.
+    Screen {
+        /// Horizontal screen point.
+        x: f64,
+        /// Vertical screen point.
         y: f64,
     },
 }
@@ -114,6 +121,8 @@ pub enum ClickOutcome {
 struct Session<H> {
     state: AppState,
     handles: Vec<H>,
+    /// The window explicitly requested for this state, if any.
+    window: Option<u64>,
 }
 
 /// A computer-use session over a [`Backend`].
@@ -246,8 +255,15 @@ impl<B: Backend> Computer<B> {
     /// Fails if the app cannot be found or launched, has no window, or permissions are missing.
     pub fn get_app_state(&mut self, app: &str, options: &CaptureOptions) -> Result<&AppState> {
         let info = self.running_app(app, options.launch_if_needed)?;
+        let window = match &options.window {
+            None => None,
+            Some(WindowSelector::Id(id)) => Some(*id),
+            Some(WindowSelector::Title(title)) => Some(self.window_by_title(&info, title)?),
+        };
         let request =
-            CaptureRequest::new(options.include_tree, options.include_screenshot, options.max_nodes, options.max_depth);
+            CaptureRequest::new(options.include_tree, options.include_screenshot, options.max_nodes, options.max_depth)
+                .with_window(window)
+                .with_menu_bar(options.include_menu_bar);
         let capture = self.backend.capture(&info, &request)?;
         let (elements, handles, raw_to_element) = build_tree(capture.nodes, options.text_limit);
         let focused = capture.focused.and_then(|raw| raw_to_element.get(raw).copied().flatten());
@@ -268,8 +284,19 @@ impl<B: Backend> Computer<B> {
             notes: capture.notes,
         };
         let key = self.remember(app, &state.app);
-        let session = Session { state, handles };
+        let session = Session { state, handles, window };
         Ok(&self.sessions.entry(key).insert_entry(session).into_mut().state)
+    }
+
+    /// The app's windows, front to back where the platform knows the order. Pass one to
+    /// [`CaptureOptions::window`] to capture it instead of the focused or main window.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the app is not running or the backend cannot list windows.
+    pub fn list_windows(&self, app: &str) -> Result<Vec<WindowInfo>> {
+        let info = self.running_app(app, false)?;
+        self.backend.list_windows(&info)
     }
 
     /// The latest captured state of an app, if any.
@@ -305,7 +332,10 @@ impl<B: Backend> Computer<B> {
             return Err(Error::invalid("query requires text and/or role"));
         }
         let previous = self.session_for(app).ok().map(|s| (s.state.window.frame, s.state.screenshot.clone()));
-        let options = CaptureOptions::default().include_screenshot(false).max_nodes(max_nodes).launch_if_needed(false);
+        let mut options =
+            CaptureOptions::default().include_screenshot(false).max_nodes(max_nodes).launch_if_needed(false);
+        // Stay on the window the last capture chose, if it was one other than the default.
+        options.window = self.session_for(app).ok().and_then(|s| s.window.map(WindowSelector::Id));
         let state = self.get_app_state(app, &options)?;
         let matches: Vec<Element> = state.find(query).cloned().collect();
         let frame = state.window.frame;
@@ -318,7 +348,7 @@ impl<B: Backend> Computer<B> {
         Ok(matches)
     }
 
-    /// Clicks an element or a screenshot pixel.
+    /// Clicks an element, a screenshot pixel, or a screen point.
     ///
     /// # Errors
     ///
@@ -327,43 +357,46 @@ impl<B: Backend> Computer<B> {
         if options.count == 0 {
             return Err(Error::invalid("click count must be at least 1"));
         }
-        let session = self.session_for(app)?;
-        let point = match target {
-            ClickTarget::Element(index) => {
-                let element = element(session, app, index)?;
-                if matches!(options.method, ClickMethod::Auto | ClickMethod::Accessibility)
-                    && let Some(action) = equivalent_action(element, options)
-                {
-                    let name = action.name.clone();
-                    self.backend.perform_action(&session.handles[index], &name)?;
-                    self.settle();
-                    return Ok(ClickOutcome::Action(name));
-                }
-                if options.method == ClickMethod::Accessibility {
-                    return Err(Error::action(format!(
-                        "element {index} has no accessibility action for a {:?} click",
-                        options.button
-                    )));
-                }
-                element
-                    .frame
-                    .filter(|f| !f.is_empty())
-                    .map(|f| f.center())
-                    .ok_or_else(|| Error::StateUnavailable(format!("element {index} has no on-screen frame")))?
-            }
-            ClickTarget::Pixel { x, y } => {
-                if options.method == ClickMethod::Accessibility {
-                    return Err(Error::invalid("accessibility clicks require an element target"));
-                }
-                screenshot_point(&session.state, x, y)?
-            }
-        };
         let delivery = match options.method {
             ClickMethod::Global => Delivery::Global,
             ClickMethod::Background => Delivery::Background,
             ClickMethod::FocusedBackground => Delivery::FocusedBackground,
             ClickMethod::Auto | ClickMethod::Accessibility => self.delivery,
         };
+        let index = match target {
+            ClickTarget::Element(index) => index,
+            ClickTarget::Pixel { x, y } | ClickTarget::Screen { x, y } => {
+                if options.method == ClickMethod::Accessibility {
+                    return Err(Error::invalid("accessibility clicks require an element target"));
+                }
+                let screen = matches!(target, ClickTarget::Screen { .. });
+                self.with_pointer(app, (x, y), screen, delivery, |backend, input, point| {
+                    backend.click(input, point, options.button, options.count)
+                })?;
+                return Ok(ClickOutcome::Pointer(delivery));
+            }
+        };
+        let session = self.session_for(app)?;
+        let element = element(session, app, index)?;
+        if matches!(options.method, ClickMethod::Auto | ClickMethod::Accessibility)
+            && let Some(action) = equivalent_action(element, options)
+        {
+            let name = action.name.clone();
+            self.backend.perform_action(&session.handles[index], &name)?;
+            self.settle();
+            return Ok(ClickOutcome::Action(name));
+        }
+        if options.method == ClickMethod::Accessibility {
+            return Err(Error::action(format!(
+                "element {index} has no accessibility action for a {:?} click",
+                options.button
+            )));
+        }
+        let point = element
+            .frame
+            .filter(|f| !f.is_empty())
+            .map(|f| f.center())
+            .ok_or_else(|| Error::StateUnavailable(format!("element {index} has no on-screen frame")))?;
         let input = input_target(&session.state, delivery);
         self.backend.click(input, point, options.button, options.count)?;
         self.settle();
@@ -419,18 +452,42 @@ impl<B: Backend> Computer<B> {
             .frame
             .filter(|f| !f.is_empty())
             .ok_or_else(|| Error::StateUnavailable(format!("element {index} has no scrollable frame")))?;
-        let page_x = (frame.size.width * 0.8).max(40.0);
-        let page_y = (frame.size.height * 0.8).max(40.0);
-        let (dx, dy) = match direction {
-            ScrollDirection::Up => (0.0, -page_y * pages),
-            ScrollDirection::Down => (0.0, page_y * pages),
-            ScrollDirection::Left => (-page_x * pages, 0.0),
-            ScrollDirection::Right => (page_x * pages, 0.0),
-        };
+        let (dx, dy) = wheel_delta(frame, direction, pages);
         let input = input_target(&session.state, self.delivery);
         self.backend.scroll(input, frame.center(), dx, dy)?;
         self.settle();
         Ok(())
+    }
+
+    /// Scrolls at an element, a screenshot pixel, or a screen point, by a number of pages
+    /// (fractions allowed).
+    ///
+    /// An element target behaves like [`scroll`](Self::scroll). For a point, wheel events are
+    /// posted there; a page is 80% of the scroll area under the point when the latest state
+    /// has one, else of the captured window, else 400 points.
+    ///
+    /// # Errors
+    ///
+    /// Fails if `pages` is not positive, a pixel lies outside the screenshot, or delivery fails.
+    pub fn scroll_at(&mut self, app: &str, target: ClickTarget, direction: ScrollDirection, pages: f64) -> Result<()> {
+        let (x, y, screen) = match target {
+            ClickTarget::Element(index) => return self.scroll(app, index, direction, pages),
+            ClickTarget::Pixel { x, y } => (x, y, false),
+            ClickTarget::Screen { x, y } => (x, y, true),
+        };
+        if !pages.is_finite() || pages <= 0.0 {
+            return Err(Error::invalid("pages must be a positive number"));
+        }
+        let state = self.session_for(app).ok().map(|s| &s.state);
+        let page_frame = |point: Point| {
+            state.and_then(|s| scroll_area_at(s, point).or(Some(s.window.frame))).filter(|f| !f.is_empty())
+        };
+        let delivery = self.delivery;
+        self.with_pointer(app, (x, y), screen, delivery, |backend, input, point| {
+            let frame = page_frame(point).unwrap_or(Rect::new(0.0, 0.0, FALLBACK_PAGE, FALLBACK_PAGE));
+            let (dx, dy) = wheel_delta(frame, direction, pages);
+            backend.scroll(input, point, dx, dy)
+        })
     }
 
     /// Drags between two screenshot pixels.
@@ -446,6 +503,16 @@ impl<B: Backend> Computer<B> {
         self.backend.drag(input, start, end)?;
         self.settle();
         Ok(())
+    }
+
+    /// Drags between two screen points. Needs no earlier capture.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the app is not running or delivery fails.
+    pub fn drag_screen(&mut self, app: &str, from: Point, to: Point) -> Result<()> {
+        let delivery = self.delivery;
+        self.with_pointer(app, (from.x, from.y), true, delivery, |backend, input, start| backend.drag(input, start, to))
     }
 
     /// Types literal text into the app's focused element.
@@ -522,6 +589,46 @@ impl<B: Backend> Computer<B> {
         Ok(())
     }
 
+    /// Resolves a screenshot pixel (or a screen point when `screen`) and runs a pointer action
+    /// there, then settles. Screen points use the remembered window when there is one, and
+    /// need no capture otherwise.
+    fn with_pointer(
+        &self,
+        app: &str,
+        (x, y): (f64, f64),
+        screen: bool,
+        delivery: Delivery,
+        act: impl FnOnce(&B, InputTarget<'_>, Point) -> Result<()>,
+    ) -> Result<()> {
+        if screen {
+            if !x.is_finite() || !y.is_finite() {
+                return Err(Error::invalid(format!("({x}, {y}) is not a screen point")));
+            }
+            let (info, window) = self.input_context(app)?;
+            act(&self.backend, InputTarget { app: &info, window: window.as_ref(), delivery }, Point::new(x, y))?;
+        } else {
+            let session = self.session_for(app)?;
+            let point = screenshot_point(&session.state, x, y)?;
+            act(&self.backend, input_target(&session.state, delivery), point)?;
+        }
+        self.settle();
+        Ok(())
+    }
+
+    fn window_by_title(&self, app: &AppInfo, title: &str) -> Result<u64> {
+        let wanted = title.trim().to_lowercase();
+        let windows = self.backend.list_windows(app)?;
+        let titled = |w: &&WindowInfo| w.id.is_some() && w.title.is_some();
+        let lower = |w: &WindowInfo| w.title.as_deref().unwrap_or_default().to_lowercase();
+        windows
+            .iter()
+            .filter(titled)
+            .find(|w| lower(w) == wanted)
+            .or_else(|| windows.iter().filter(titled).find(|w| lower(w).contains(&wanted)))
+            .and_then(|w| w.id)
+            .ok_or_else(|| Error::WindowNotFound(format!("{} (no window titled {title:?})", app.name)))
+    }
+
     fn running_app(&self, query: &str, launch: bool) -> Result<AppInfo> {
         let info = self.resolve_app(query)?;
         if info.is_running {
@@ -533,7 +640,7 @@ impl<B: Backend> Computer<B> {
         }
     }
 
-    fn input_context(&self, app: &str) -> Result<(AppInfo, Option<crate::state::WindowInfo>)> {
+    fn input_context(&self, app: &str) -> Result<(AppInfo, Option<WindowInfo>)> {
         if let Ok(session) = self.session_for(app) {
             return Ok((session.state.app.clone(), Some(session.state.window.clone())));
         }
@@ -596,6 +703,32 @@ fn screenshot_point(state: &AppState, x: f64, y: f64) -> Result<Point> {
         return Err(Error::invalid(format!("({x}, {y}) is outside the {}x{} screenshot", shot.width(), shot.height())));
     }
     Ok(shot.to_screen_point(x, y))
+}
+
+/// Points per page when nothing tells how large the scrolled area is.
+const FALLBACK_PAGE: f64 = 500.0;
+
+/// The wheel delta for scrolling `frame` by `pages`: a page is 80% of the frame (at least 40).
+fn wheel_delta(frame: Rect, direction: ScrollDirection, pages: f64) -> (f64, f64) {
+    let page_x = (frame.size.width * 0.8).max(40.0);
+    let page_y = (frame.size.height * 0.8).max(40.0);
+    match direction {
+        ScrollDirection::Up => (0.0, -page_y * pages),
+        ScrollDirection::Down => (0.0, page_y * pages),
+        ScrollDirection::Left => (-page_x * pages, 0.0),
+        ScrollDirection::Right => (page_x * pages, 0.0),
+    }
+}
+
+/// The frame of the innermost scroll container under `point`.
+fn scroll_area_at(state: &AppState, point: Point) -> Option<Rect> {
+    state
+        .elements
+        .iter()
+        .filter(|e| e.role.contains("scroll") && !e.role.contains("bar"))
+        .filter_map(|e| e.frame)
+        .filter(|f| !f.is_empty() && f.contains(point))
+        .min_by(|a, b| a.area().total_cmp(&b.area()))
 }
 
 const fn input_target(state: &AppState, delivery: Delivery) -> InputTarget<'_> {

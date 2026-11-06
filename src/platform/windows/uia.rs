@@ -81,6 +81,13 @@ pub(super) struct Uia {
     walker: IUIAutomationTreeWalker,
 }
 
+#[allow(clippy::non_send_fields_in_send_ty)] // see the SAFETY comment
+// SAFETY: the automation client, cache request and tree walker are free-threaded UI Automation
+// client objects, and the backend joins each calling thread to the multithreaded apartment first.
+unsafe impl Send for Uia {}
+// SAFETY: as above; none of the three has `&self` state that concurrent calls could race on.
+unsafe impl Sync for Uia {}
+
 pub(super) struct Walk {
     pub(super) nodes: Vec<RawNode<IUIAutomationElement>>,
     pub(super) truncated: bool,
