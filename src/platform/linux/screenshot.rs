@@ -91,6 +91,24 @@ fn read_image(
     })
 }
 
+/// Whether process `pid` has a top-level window on the X server, i.e. is an X11 or `XWayland` app.
+///
+/// `None` when there is no reachable X server or the window manager publishes no client list.
+pub(crate) fn has_x11_window(session: &SessionEnv, pid: u32) -> Option<bool> {
+    let (conn, screen_num) = connect(session.display()?, session.xauthority().as_deref())?;
+    let root = conn.setup().roots.get(screen_num)?.root;
+    let atom = |name: &str| conn.intern_atom(true, name.as_bytes()).ok()?.reply().ok().map(|r| r.atom);
+    let (client_list, wm_pid) = (atom("_NET_CLIENT_LIST")?, atom("_NET_WM_PID")?);
+    let clients = conn.get_property(false, root, client_list, AtomEnum::WINDOW, 0, 4096).ok()?.reply().ok()?;
+    Some(clients.value32()?.any(|window| {
+        conn.get_property(false, window, wm_pid, AtomEnum::CARDINAL, 0, 1)
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .and_then(|r| r.value32()?.next())
+            == Some(pid)
+    }))
+}
+
 /// The app's top-level X11 window (from the window manager's `_NET_CLIENT_LIST`) and its frame
 /// in root coordinates: the one titled `title`, else the one overlapping `frame` most.
 fn client_window(conn: &RustConnection, root: u32, pid: u32, title: Option<&str>, frame: Rect) -> Option<(u32, Rect)> {

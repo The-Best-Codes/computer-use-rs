@@ -15,7 +15,7 @@ use self::session::SessionEnv;
 
 use crate::app::AppInfo;
 use crate::backend::{Backend, Capture, CaptureRequest, InputTarget, MouseButton};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::geometry::Point;
 use crate::keys::KeyChord;
 use crate::state::WindowInfo;
@@ -75,6 +75,28 @@ impl LinuxBackend {
     }
 }
 
+impl LinuxBackend {
+    /// Fails when synthesized input cannot reach the target app.
+    ///
+    /// Keyboard and pointer events are injected through the X server, so under Wayland they only
+    /// reach X11 (`XWayland`) apps. Reporting success for a native Wayland app would hide that
+    /// nothing happened.
+    fn ensure_input_reaches(&self, target: &InputTarget<'_>) -> Result<()> {
+        if self.session.get("WAYLAND_DISPLAY").is_none() {
+            return Ok(());
+        }
+        let Some(pid) = target.app.pid else { return Ok(()) };
+        if screenshot::has_x11_window(&self.session, pid) == Some(false) {
+            return Err(Error::Unsupported(format!(
+                "{} uses a native Wayland window, which synthesized keyboard and pointer input cannot reach; \
+                 use accessibility actions instead (click an element by index, set a field's value, or perform an element action)",
+                target.app.name
+            )));
+        }
+        Ok(())
+    }
+}
+
 impl Backend for LinuxBackend {
     type Handle = LinuxElement;
 
@@ -131,23 +153,28 @@ impl Backend for LinuxBackend {
         a11y::select_text(&self.conn, element, value, range)
     }
 
-    fn click(&self, _target: InputTarget<'_>, point: Point, button: MouseButton, count: u32) -> Result<()> {
+    fn click(&self, target: InputTarget<'_>, point: Point, button: MouseButton, count: u32) -> Result<()> {
+        self.ensure_input_reaches(&target)?;
         input::click(&self.conn, point, button, count)
     }
 
-    fn scroll(&self, _target: InputTarget<'_>, point: Point, dx: f64, dy: f64) -> Result<()> {
+    fn scroll(&self, target: InputTarget<'_>, point: Point, dx: f64, dy: f64) -> Result<()> {
+        self.ensure_input_reaches(&target)?;
         input::scroll(&self.conn, point, dx, dy)
     }
 
-    fn drag(&self, _target: InputTarget<'_>, from: Point, to: Point) -> Result<()> {
+    fn drag(&self, target: InputTarget<'_>, from: Point, to: Point) -> Result<()> {
+        self.ensure_input_reaches(&target)?;
         input::drag(&self.conn, from, to)
     }
 
-    fn type_text(&self, _target: InputTarget<'_>, text: &str) -> Result<()> {
+    fn type_text(&self, target: InputTarget<'_>, text: &str) -> Result<()> {
+        self.ensure_input_reaches(&target)?;
         input::type_text(&self.conn, text)
     }
 
-    fn press_key(&self, _target: InputTarget<'_>, chord: &KeyChord) -> Result<()> {
+    fn press_key(&self, target: InputTarget<'_>, chord: &KeyChord) -> Result<()> {
+        self.ensure_input_reaches(&target)?;
         input::press_key(&self.conn, chord)
     }
 }
