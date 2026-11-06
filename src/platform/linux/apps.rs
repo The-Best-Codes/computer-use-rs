@@ -49,7 +49,13 @@ pub(crate) fn find_running(conn: &Connection, app: &AppInfo) -> Result<LinuxElem
         .find(|r| app.pid.is_some() && r.pid == app.pid)
         .or_else(|| running.iter().find(|r| r.name.eq_ignore_ascii_case(&app.name)))
         .map(|r| r.element.clone())
-        .ok_or_else(|| Error::AppNotFound(format!("{} is not registered on the accessibility bus", app.name)))
+        .ok_or_else(|| {
+            Error::AppNotFound(format!(
+                "{} is not registered on the accessibility bus. Some apps only register if \
+                 accessibility was enabled when they started: quit {} completely and start it again",
+                app.name, app.name
+            ))
+        })
 }
 
 pub(crate) fn list_apps(conn: &Connection) -> Result<Vec<AppInfo>> {

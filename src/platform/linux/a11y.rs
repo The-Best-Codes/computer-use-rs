@@ -3,7 +3,7 @@ use std::ops::Range;
 
 use atspi::proxy::accessible::AccessibleProxyBlocking;
 use atspi::proxy::action::ActionProxyBlocking;
-use atspi::proxy::bus::BusProxyBlocking;
+use atspi::proxy::bus::{BusProxyBlocking, StatusProxyBlocking};
 use atspi::proxy::component::ComponentProxyBlocking;
 use atspi::proxy::editable_text::EditableTextProxyBlocking;
 use atspi::proxy::text::TextProxyBlocking;
@@ -49,13 +49,30 @@ pub(crate) fn connect(session: &SessionEnv) -> Result<Connection> {
         .map_err(|e| Error::Platform(format!("cannot connect to the AT-SPI bus at {address}: {e}")))
 }
 
-fn accessibility_bus_address(session: &SessionEnv) -> Result<String> {
-    let session_bus = session
+fn session_bus(session: &SessionEnv) -> Result<Connection> {
+    session
         .session_bus()
         .map_or_else(Connection::session, |address| {
             zbus::blocking::connection::Builder::address(address).and_then(zbus::blocking::connection::Builder::build)
         })
-        .map_err(|e| Error::Platform(format!("cannot connect to the D-Bus session bus: {e}")))?;
+        .map_err(|e| Error::Platform(format!("cannot connect to the D-Bus session bus: {e}")))
+}
+
+/// Turns on `org.a11y.Status.IsEnabled`, the flag screen readers set.
+///
+/// GTK apps always register on the accessibility bus, but some apps only do so if this flag is on when they start.
+/// Without it Chrome, Discord, VS Code and the like are invisible.
+/// Best effort: failures are ignored, since GTK apps work either way.
+pub(crate) fn enable_accessibility(session: &SessionEnv) {
+    let Ok(bus) = session_bus(session) else { return };
+    let Ok(status) = StatusProxyBlocking::new(&bus) else { return };
+    if status.is_enabled() != Ok(true) {
+        let _ = status.set_is_enabled(true);
+    }
+}
+
+fn accessibility_bus_address(session: &SessionEnv) -> Result<String> {
+    let session_bus = session_bus(session)?;
     BusProxyBlocking::new(&session_bus).and_then(|bus| bus.get_address()).map_err(|e| {
         Error::Platform(format!("the AT-SPI accessibility bus is unavailable (is at-spi2-core running?): {e}"))
     })

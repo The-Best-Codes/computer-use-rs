@@ -61,11 +61,16 @@ impl LinuxBackend {
     /// `XAUTHORITY`, `XDG_RUNTIME_DIR`, `AT_SPI_BUS_ADDRESS`, ...) are discovered from the
     /// user's running desktop processes, so the backend also works from services, cron jobs and SSH sessions.
     ///
+    /// Also turns on the desktop's accessibility flag (`org.a11y.Status.IsEnabled`),
+    /// which some apps need in order to expose their UI. Apps of that kind that were
+    /// already running before the flag was on must be restarted to show up.
+    ///
     /// # Errors
     ///
     /// Fails if there is no D-Bus session or the accessibility bus is not running.
     pub fn new() -> Result<Self> {
         let session = SessionEnv::discover();
+        a11y::enable_accessibility(&session);
         Ok(Self { conn: a11y::connect(&session)?, session: Arc::new(session) })
     }
 }
