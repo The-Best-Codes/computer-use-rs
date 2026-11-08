@@ -130,6 +130,7 @@ impl Backend for WindowsBackend {
     type Handle = WindowsElement;
 
     fn list_apps(&self) -> Result<Vec<AppInfo>> {
+        ensure_com()?;
         Ok(apps::list_apps())
     }
 

@@ -294,7 +294,7 @@ pub(super) fn replace_selection(hwnd: HWND, pid: u32, text: &str) -> Result<bool
     Ok(true)
 }
 
-fn class_name(hwnd: HWND) -> String {
+pub(super) fn class_name(hwnd: HWND) -> String {
     let mut buffer = [0u16; 256];
     // SAFETY: the slice is writable and its length is passed along with it.
     let len = unsafe { GetClassNameW(hwnd, &mut buffer) };

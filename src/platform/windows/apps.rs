@@ -2,29 +2,37 @@ use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt as _;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, RECT, TRUE};
+use windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE, HWND, LPARAM, RECT, TRUE};
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
-use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, IPersistFile, STGM_READ};
+use windows::Win32::Storage::Packaging::Appx::GetApplicationUserModelId;
+use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree, IPersistFile, STGM_READ};
 use windows::Win32::System::Threading::{
     GetProcessId, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::Shell::{
-    IShellLinkW, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW, ShellLink,
+    BHID_EnumItems, FOLDERID_AppsFolder, IEnumShellItems, IShellItem, IShellLinkW, KF_FLAG_DEFAULT,
+    SEE_MASK_FLAG_NO_UI, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, SHGetKnownFolderItem, SIGDN, SIGDN_NORMALDISPLAY,
+    SIGDN_PARENTRELATIVEPARSING, ShellExecuteExW, ShellLink,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GW_OWNER, GWL_EXSTYLE, GetForegroundWindow, GetWindow, GetWindowLongPtrW, GetWindowRect,
-    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, SW_SHOWNOACTIVATE,
+    EnumChildWindows, EnumWindows, GW_OWNER, GWL_EXSTYLE, GetForegroundWindow, GetWindow, GetWindowLongPtrW,
+    GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, SW_SHOWNOACTIVATE,
     WS_EX_TOOLWINDOW,
 };
 use windows::core::{BOOL, HSTRING, PWSTR, w};
 
 use super::WinResultExt as _;
+use super::input::class_name;
 use crate::app::AppInfo;
 use crate::error::{Error, Result};
 
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A packaged app's application user model ID and display name.
+type PackagedApp = (String, String);
 
 pub(super) fn list_apps() -> Vec<AppInfo> {
     let mut apps = running_apps();
@@ -35,6 +43,7 @@ pub(super) fn list_apps() -> Vec<AppInfo> {
 fn running_apps() -> Vec<AppInfo> {
     let foreground = foreground_window().map(window_pid);
     let mut by_pid: BTreeMap<u32, AppInfo> = BTreeMap::new();
+    let mut packaged: Option<Vec<PackagedApp>> = None;
     for hwnd in top_level_windows() {
         if !is_app_window(hwnd) {
             continue;
@@ -45,7 +54,19 @@ fn running_apps() -> Vec<AppInfo> {
         }
         let path = process_path(pid);
         let stem = path.as_deref().and_then(Path::file_stem).map(|s| s.to_string_lossy().into_owned());
-        let name = stem.unwrap_or_else(|| window_title(hwnd));
+        let packaged_name = process_app_id(pid).and_then(|id| {
+            packaged
+                .get_or_insert_with(packaged_apps)
+                .iter()
+                .find(|(app_id, _)| app_id.eq_ignore_ascii_case(&id))
+                .map(|(_, name)| name.clone())
+        });
+        // A frame whose app couldn't be found, like a minimized UWP app's, is named by its title.
+        let frame_title = stem
+            .as_deref()
+            .is_some_and(|stem| stem.eq_ignore_ascii_case("ApplicationFrameHost"))
+            .then(|| window_title(hwnd));
+        let name = frame_title.or(packaged_name).or(stem).unwrap_or_else(|| window_title(hwnd));
         let mut app = AppInfo::new(name)
             .with_pid(pid)
             .with_active(foreground == Some(pid))
@@ -70,14 +91,95 @@ fn installed_apps() -> Vec<AppInfo> {
         }
     }
     let mut seen = HashSet::new();
-    shortcuts
+    let mut apps: Vec<AppInfo> = shortcuts
         .into_iter()
         .filter_map(|path| {
             let name = path.file_stem()?.to_string_lossy().into_owned();
             let key = name.to_lowercase();
             (!key.starts_with("uninstall") && seen.insert(key)).then(|| AppInfo::new(name).with_path(path))
         })
-        .collect()
+        .collect();
+    // Packaged (Store) apps have no Start Menu shortcut; `shell:AppsFolder` launches them by ID.
+    apps.extend(
+        packaged_apps()
+            .into_iter()
+            .filter(|(_, name)| seen.insert(name.to_lowercase()))
+            .map(|(id, name)| AppInfo::new(name).with_path(format!(r"shell:AppsFolder\{id}"))),
+    );
+    apps
+}
+
+/// The application user model ID and display name of each packaged app, cached because listing
+/// the shell's Apps folder takes hundreds of milliseconds.
+fn packaged_apps() -> Vec<PackagedApp> {
+    const TTL: Duration = Duration::from_secs(60);
+    static CACHE: Mutex<Option<(Instant, Vec<PackagedApp>)>> = Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((listed_at, apps)) = cache.as_ref()
+        && listed_at.elapsed() < TTL
+    {
+        return apps.clone();
+    }
+    let apps = list_packaged_apps();
+    if !apps.is_empty() {
+        *cache = Some((Instant::now(), apps.clone()));
+    }
+    apps
+}
+
+fn list_packaged_apps() -> Vec<PackagedApp> {
+    // SAFETY: plain FFI call with a static GUID and no access token.
+    let folder = unsafe { SHGetKnownFolderItem::<IShellItem>(&FOLDERID_AppsFolder, KF_FLAG_DEFAULT, None) };
+    let Ok(folder) = folder else {
+        return Vec::new();
+    };
+    let Ok(items) = com!(folder.BindToHandler::<_, IEnumShellItems>(None, &BHID_EnumItems)) else {
+        return Vec::new();
+    };
+    let mut apps = Vec::new();
+    loop {
+        let mut item = [None];
+        if com!(items.Next(&mut item, None)).is_err() {
+            break;
+        }
+        let Some(item) = item[0].take() else {
+            break;
+        };
+        let (Some(name), Some(id)) =
+            (shell_item_name(&item, SIGDN_NORMALDISPLAY), shell_item_name(&item, SIGDN_PARENTRELATIVEPARSING))
+        else {
+            continue;
+        };
+        if id.contains('!') && !id.contains(['\\', '/']) && !name.trim().is_empty() {
+            apps.push((id, name));
+        }
+    }
+    apps
+}
+
+fn shell_item_name(item: &IShellItem, kind: SIGDN) -> Option<String> {
+    let name = com!(item.GetDisplayName(kind)).ok()?;
+    // SAFETY: the shell returned a valid, null-terminated string.
+    let text = unsafe { name.to_string() }.ok();
+    // SAFETY: the string was allocated by the shell with the COM allocator and is freed once.
+    unsafe { CoTaskMemFree(Some(name.0.cast_const().cast())) };
+    text
+}
+
+/// The application user model ID of a packaged app's process; `None` for unpackaged processes.
+fn process_app_id(pid: u32) -> Option<String> {
+    // SAFETY: plain FFI call; failure is reported through the result.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    let handle = OwnedHandle(handle);
+    let mut buffer = [0u16; 256];
+    let mut len = u32::try_from(buffer.len()).ok()?;
+    // SAFETY: `buffer` holds `len` writable UTF-16 units and `len` is a writable u32.
+    let result = unsafe { GetApplicationUserModelId(handle.0, &raw mut len, Some(PWSTR(buffer.as_mut_ptr()))) };
+    if result != ERROR_SUCCESS {
+        return None;
+    }
+    let len = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
+    (len > 0).then(|| String::from_utf16_lossy(&buffer[..len]))
 }
 
 fn collect_shortcuts(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
@@ -110,6 +212,11 @@ pub(super) fn launch(app: &AppInfo) -> Result<AppInfo> {
     let launched = shell_execute(&HSTRING::from(target.as_os_str()))?;
 
     let deadline = Instant::now() + LAUNCH_TIMEOUT;
+    // A starting UWP app's frame belongs to `ApplicationFrameHost` until the app's window
+    // attaches to it, so give the app's own process a moment to show up first.
+    let frame_host_deadline = Instant::now() + LAUNCH_TIMEOUT / 2;
+    let is_frame_host =
+        |app: &AppInfo| app.bundle_id.as_deref().is_some_and(|b| b.eq_ignore_ascii_case("ApplicationFrameHost.exe"));
     loop {
         let running = running_apps();
         let found = running
@@ -124,7 +231,9 @@ pub(super) fn launch(app: &AppInfo) -> Result<AppInfo> {
                     .iter()
                     .find(|a| a.pid.is_some_and(|pid| !before.contains(&pid)) && a.match_score(&app.name).is_some())
             });
-        if let Some(found) = found {
+        if let Some(found) = found
+            && (!is_frame_host(found) || Instant::now() >= frame_host_deadline)
+        {
             return Ok(found.clone());
         }
         if Instant::now() >= deadline {
@@ -231,11 +340,34 @@ pub(super) fn window_title(hwnd: HWND) -> String {
     String::from_utf16_lossy(&buffer[..copied])
 }
 
+/// The process that owns the window. A UWP app's frame belongs to the shared
+/// `ApplicationFrameHost` process, so for a frame this is the process of the app it hosts.
 pub(super) fn window_pid(hwnd: HWND) -> u32 {
+    let pid = raw_window_pid(hwnd);
+    if class_name(hwnd) != "ApplicationFrameWindow" {
+        return pid;
+    }
+    child_windows(hwnd)
+        .into_iter()
+        .filter(|&child| class_name(child) == "Windows.UI.Core.CoreWindow")
+        .map(raw_window_pid)
+        .find(|&child_pid| child_pid != 0 && child_pid != pid)
+        .unwrap_or(pid)
+}
+
+fn raw_window_pid(hwnd: HWND) -> u32 {
     let mut pid = 0u32;
     // SAFETY: `pid` is a writable u32.
     unsafe { GetWindowThreadProcessId(hwnd, Some(&raw mut pid)) };
     pid
+}
+
+fn child_windows(parent: HWND) -> Vec<HWND> {
+    let mut windows: Vec<HWND> = Vec::new();
+    let lparam = LPARAM(std::ptr::from_mut(&mut windows).expose_provenance().cast_signed());
+    // SAFETY: the callback runs only during this call and only touches `windows` through `lparam`.
+    let _ = unsafe { EnumChildWindows(Some(parent), Some(collect_window), lparam) };
+    windows
 }
 
 pub(super) fn foreground_window() -> Option<HWND> {
