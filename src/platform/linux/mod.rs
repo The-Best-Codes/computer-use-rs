@@ -14,7 +14,7 @@ use self::screenshot::Shot;
 use self::session::SessionEnv;
 
 use crate::app::AppInfo;
-use crate::backend::{Backend, Capture, CaptureRequest, InputTarget, MouseButton};
+use crate::backend::{Backend, Capture, CaptureRequest, Delivery, InputTarget, MouseButton};
 use crate::error::{Error, Result};
 use crate::geometry::Point;
 use crate::keys::KeyChord;
@@ -76,12 +76,20 @@ impl LinuxBackend {
 }
 
 impl LinuxBackend {
-    /// Fails when synthesized input cannot reach the target app.
+    /// Fails unless desktop-wide input was explicitly requested and is supported.
     ///
     /// Keyboard and pointer events are injected through the X server, so under Wayland they only
     /// reach X11 (`XWayland`) apps. Reporting success for a native Wayland app would hide that
     /// nothing happened.
     fn ensure_input_reaches(&self, target: &InputTarget<'_>) -> Result<()> {
+        if target.delivery != Delivery::Global {
+            return Err(Error::Unsupported(
+                "Linux cannot deliver synthesized input to an app in the background; use accessibility actions \
+                 or explicitly select Delivery::Global (events go to the desktop's current focus/pointer, \
+                 which may belong to another app)"
+                    .into(),
+            ));
+        }
         if self.session.get("WAYLAND_DISPLAY").is_none() {
             return Ok(());
         }
@@ -178,3 +186,6 @@ impl Backend for LinuxBackend {
         input::press_key(&self.conn, chord)
     }
 }
+
+#[cfg(test)]
+mod input_tests;
