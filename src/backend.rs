@@ -81,7 +81,9 @@ impl std::str::FromStr for ScrollDirection {
 pub enum Delivery {
     /// Post events directly to the target app without moving the user's pointer or
     /// changing focus, where the platform allows it. Backends that cannot target an app
-    /// fall back to [`Delivery::Global`].
+    /// may fall back to [`Delivery::Global`]. Linux instead returns [`Error::Unsupported`]
+    /// for synthesized input unless `Global` is explicitly selected. Accessibility actions
+    /// remain available without global input.
     #[default]
     Background,
     /// Like [`Delivery::Background`], but the target window is also made active and key
@@ -93,6 +95,8 @@ pub enum Delivery {
     /// Other platforms treat it as [`Delivery::Background`].
     FocusedBackground,
     /// Post events through the system input stream. May move the pointer and activate the app.
+    /// On Linux this does not activate or verify the target: keys go to the current focus,
+    /// and pointer events go to the supplied screen coordinates, possibly in another app.
     Global,
 }
 

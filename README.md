@@ -70,7 +70,13 @@ layer, so you can drive a fake desktop in tests or add a platform.
 | Linux       | AT-SPI            | X11 `GetImage` of the app's window           | AT-SPI device event controller                                                                |
 
 By default, synthetic input uses `Delivery::Background`. Events go to the target app without
-moving your pointer or changing focus, where the OS allows it. On macOS, Command-key shortcuts
+moving your pointer or changing focus, where the OS allows it. On Linux, synthesized input
+requires an explicit `Delivery::Global`; `Background` and `FocusedBackground` return
+`Error::Unsupported` before sending any input. Accessibility actions still work without global
+delivery. Linux global input does not activate or verify the named app: keyboard events go to
+the current focus, and pointer events go to the supplied screen coordinates. Another app may
+receive them. Only opt in on a desktop whose focus and window layout you control.
+On macOS, Command-key shortcuts
 still work in the background: they are resolved to the app's menu item. `Delivery::FocusedBackground`
 (or `ClickMethod::FocusedBackground`) also gives the target window synthetic focus inside its
 own process, which Chromium/Electron apps need for background clicks and typing. It uses

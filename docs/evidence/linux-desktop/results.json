@@ -1,0 +1,38 @@
+[
+  {
+    "case": "baseline-background",
+    "requested_target": "A",
+    "keyboard_focus_before_and_after": "B",
+    "api_result": "OK",
+    "editor_A_text": "",
+    "editor_B_text": "CU_BASELINE_BACKGROUND_MARKER",
+    "assertions": "PASS"
+  },
+  {
+    "case": "fixed-background",
+    "requested_target": "A",
+    "keyboard_focus_before_and_after": "B",
+    "api_result": "UNSUPPORTED",
+    "editor_A_text": "",
+    "editor_B_text": "",
+    "assertions": "PASS"
+  },
+  {
+    "case": "baseline-global",
+    "requested_target": "A",
+    "keyboard_focus_before_and_after": "B",
+    "api_result": "OK",
+    "editor_A_text": "",
+    "editor_B_text": "CU_BASELINE_GLOBAL_MARKER",
+    "assertions": "PASS"
+  },
+  {
+    "case": "fixed-global",
+    "requested_target": "A",
+    "keyboard_focus_before_and_after": "B",
+    "api_result": "OK",
+    "editor_A_text": "",
+    "editor_B_text": "CU_FIXED_GLOBAL_MARKER",
+    "assertions": "PASS"
+  }
+]

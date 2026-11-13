@@ -1,0 +1,73 @@
+running 1 test
+
+thread 'platform::linux::input_tests::background_input_never_emits_desktop_events' (958828) panicked at src/platform/linux/input_tests.rs:91:5:
+Background input must fail before emitting events. Unexpected results: [
+    "Background click: Ok(())",
+    "Background scroll: Ok(())",
+    "Background drag: Ok(())",
+    "Background type_text: Ok(())",
+    "Background press_key: Ok(())",
+    "FocusedBackground click: Ok(())",
+    "FocusedBackground scroll: Ok(())",
+    "FocusedBackground drag: Ok(())",
+    "FocusedBackground type_text: Ok(())",
+    "FocusedBackground press_key: Ok(())",
+]; recorded events: [
+    "mouse 10,20 abs",
+    "mouse 10,20 b1p",
+    "mouse 10,20 b1r",
+    "mouse 10,20 abs",
+    "mouse 10,20 b5c",
+    "mouse 10,20 abs",
+    "mouse 10,20 b1p",
+    "mouse 12,22 abs",
+    "mouse 13,23 abs",
+    "mouse 15,25 abs",
+    "mouse 17,27 abs",
+    "mouse 18,28 abs",
+    "mouse 20,30 abs",
+    "mouse 22,32 abs",
+    "mouse 23,33 abs",
+    "mouse 25,35 abs",
+    "mouse 27,37 abs",
+    "mouse 28,38 abs",
+    "mouse 30,40 abs",
+    "mouse 30,40 b1r",
+    "key 0 \"CU_REPRO_MARKER\" String",
+    "key 65293 \"\" Sym",
+    "key 65293 \"\" Sym",
+    "mouse 10,20 abs",
+    "mouse 10,20 b1p",
+    "mouse 10,20 b1r",
+    "mouse 10,20 abs",
+    "mouse 10,20 b5c",
+    "mouse 10,20 abs",
+    "mouse 10,20 b1p",
+    "mouse 12,22 abs",
+    "mouse 13,23 abs",
+    "mouse 15,25 abs",
+    "mouse 17,27 abs",
+    "mouse 18,28 abs",
+    "mouse 20,30 abs",
+    "mouse 22,32 abs",
+    "mouse 23,33 abs",
+    "mouse 25,35 abs",
+    "mouse 27,37 abs",
+    "mouse 28,38 abs",
+    "mouse 30,40 abs",
+    "mouse 30,40 b1r",
+    "key 0 \"CU_REPRO_MARKER\" String",
+    "key 65293 \"\" Sym",
+    "key 65293 \"\" Sym",
+]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test platform::linux::input_tests::background_input_never_emits_desktop_events ... FAILED
+
+failures:
+
+failures:
+    platform::linux::input_tests::background_input_never_emits_desktop_events
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 49 filtered out; finished in 0.71s
+
+error: test failed, to rerun pass `--lib`
