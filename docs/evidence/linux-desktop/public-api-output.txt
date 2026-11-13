@@ -1,0 +1,19 @@
+=== baseline-background ===
+resolved target: cu-scratch-a (pid 969118)
+delivery: Background; type_text: Ok(())
+RESULT=OK
+
+=== fixed-background ===
+resolved target: cu-scratch-a (pid 969164)
+delivery: Background; type_text: Err(Unsupported("Linux cannot deliver synthesized input to an app in the background; use accessibility actions or explicitly select Delivery::Global (events go to the desktop's current focus/pointer, which may belong to another app)"))
+RESULT=UNSUPPORTED
+
+=== baseline-global ===
+resolved target: cu-scratch-a (pid 969192)
+delivery: Global; type_text: Ok(())
+RESULT=OK
+
+=== fixed-global ===
+resolved target: cu-scratch-a (pid 969225)
+delivery: Global; type_text: Ok(())
+RESULT=OK

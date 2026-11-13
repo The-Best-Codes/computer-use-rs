@@ -14,7 +14,67 @@ that the default mode gave callers no error or accurate delivery result when
 Linux could not honor app targeting. A caller could type into an unrelated
 focused app. This is a routing/consent issue, not evidence of malicious code.
 
-## Run the safe reproduction
+## Real desktop reproduction through the public API
+
+The stronger repro uses **real GTK editors, real AT-SPI services, and a real X11
+server (Xvfb)**, without a mock backend or recording controller. The same Rust
+example is built against baseline and patched source in separate Cargo target
+directories. It calls `Computer::new`, resolves editor A by exact PID, and calls
+`Computer::type_text` targeting A while editor B holds keyboard focus.
+
+```sh
+bash scripts/repro-linux-desktop.sh
+```
+
+Additional prerequisites: `Xvfb`, Python 3 with PyGObject, GTK 3 introspection,
+Pillow, and the normal AT-SPI services. On Debian/Ubuntu these are typically
+`xvfb python3-gi gir1.2-gtk-3.0 python3-pil at-spi2-core dbus`. Use system Python
+with these packages available. No window manager or existing desktop is needed.
+
+The harness starts its own authenticated Xvfb (`-nolisten tcp`), private D-Bus
+session, temporary HOME and runtime directory, and memory-only settings backend.
+It passes explicit private display, session-bus and accessibility-bus addresses
+to the driver. It enables accessibility only on that private session. It starts
+two separate scratch-editor processes per scenario, focuses B with Xlib, and
+checks the X server's focus before and after the API call. It stops the fixture
+process groups, including D-Bus-activated children, when done.
+
+Each editor independently writes its own **Gtk.TextBuffer** contents to JSON.
+Those values, rather than this library's accessibility reader or screenshots,
+verify the destination. Screenshots and the GIF are captured from the private
+X server through GDK, independently of this library's screenshot implementation.
+All input is a harmless ASCII marker, without newlines, commands or shortcuts.
+
+Observed results (all four assertions passed):
+
+| Source | Delivery | API result | Editor A (requested) | Editor B (focused) |
+| --- | --- | --- | --- | --- |
+| Baseline 0.3.2 | Background | `Ok(())` | Empty | Marker received |
+| Patched | Background | `Unsupported` | Empty | Empty |
+| Baseline 0.3.2 | Global | `Ok(())` | Empty | Marker received |
+| Patched | Global | `Ok(())` | Empty | Marker received |
+
+[Machine-readable results](evidence/linux-desktop/results.json) ·
+[public API stdout](evidence/linux-desktop/public-api-output.txt) ·
+[editor-owned buffer snapshots](evidence/linux-desktop/buffers)
+
+The 12.4-second recording below contains actual captured frames from all four
+scenarios. Each window's heading identifies the scenario and its role.
+
+![Four real desktop scenarios](evidence/linux-desktop/desktop-recording.gif)
+
+[Baseline background screenshot](evidence/linux-desktop/baseline-background.png) ·
+[Patched background screenshot](evidence/linux-desktop/fixed-background.png) ·
+[Baseline global screenshot](evidence/linux-desktop/baseline-global.png) ·
+[Patched global screenshot](evidence/linux-desktop/fixed-global.png)
+
+The global cases establish the remaining limitation even with explicit opt-in:
+**naming editor A does not make Linux synthetic typing reach A**. The patch
+addresses implicit global delivery; it does not repair app targeting in Global.
+The existing documented fallback is acknowledged above, rather than treating
+background-mode behavior alone as evidence of an undocumented fallback.
+
+## Recording-bus regression reproduction
 
 Prerequisites: Linux, Git, Bash, Rust >= 1.89 and `dbus-daemon` (usually package
 `dbus`). Cargo needs the locked dependencies cached or network access to fetch
@@ -99,8 +159,10 @@ or prevent focus changes. This PR documents that limitation; it does not claim
 to implement secure app-scoped global delivery. Targeted editable-text insertion
 and verified input routing would be separate improvements.
 
-The automated proof establishes which events the backend emits, their return
-values, and that the patch suppresses them. It does not claim a live desktop
-wrong-window demonstration, privilege escalation, or a bypass of native Wayland
-restrictions. Other review findings (accessibility settings, session discovery,
-password redaction, screenshot fallback) are outside this focused PR.
+The recording-bus test establishes event emission and suppression for all five
+operations. The real desktop repro additionally demonstrates wrong-app text
+insertion through the public API on X11, and confirms both the background fix
+and remaining global limitation. It does not establish privilege escalation or
+a bypass of native Wayland restrictions. Other review findings (accessibility
+settings, session discovery, password redaction, screenshot fallback) are
+outside this focused PR.

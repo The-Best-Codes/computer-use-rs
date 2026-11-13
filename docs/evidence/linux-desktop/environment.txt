@@ -1,0 +1,9 @@
+Linux 7.0.0-43-generic
+rustc 1.99.1 (58cf8f9c3 2026-10-13)
+cargo 1.99.1 (5f94df478 2026-08-27)
+at-spi2-core 2.60.4-0ubuntu0.1
+gir1.2-gtk-3.0 3.24.52-0ubuntu1
+python3-gi 3.56.2-1
+python3-pil 12.1.1-2ubuntu1.4
+Package: xvfb
+Version: 2:21.1.22-1ubuntu1.3
