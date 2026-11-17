@@ -26,6 +26,8 @@ pub(crate) const ROOT_PATH: &str = "/org/a11y/atspi/accessible/root";
 
 const CAPTURE_TEXT_LIMIT: i32 = 10_000;
 
+const FOCUS_SEARCH_LIMIT: usize = 5_000;
+
 const TEXT_VALUE_ROLES: [&str; 7] =
     ["entry", "password text", "text", "terminal", "document text", "editbar", "combo box"];
 
@@ -461,6 +463,54 @@ pub(crate) fn set_value(conn: &Connection, element: &LinuxElement, value: &str) 
         return proxy.set_current_value(number).map_err(dbus);
     }
     Err(Error::Unsupported("this element's value cannot be set".into()))
+}
+
+/// The app's focused element, when it is an editable text field.
+fn focused_editable(conn: &Connection, app: &LinuxElement) -> Option<LinuxElement> {
+    let mut stack = children(conn, app).ok()?;
+    for _ in 0..FOCUS_SEARCH_LIMIT {
+        let element = stack.pop()?;
+        let Ok(accessible) = proxy::<AccessibleProxyBlocking<'_>>(conn, &element) else { continue };
+        let states = accessible.get_state().unwrap_or_else(|_| StateSet::empty());
+        if states.contains(State::Focused) {
+            let editable = accessible.get_interfaces().is_ok_and(|i| i.contains(Interface::EditableText));
+            drop(accessible);
+            return editable.then_some(element);
+        }
+        if states.contains(State::Showing) || states.contains(State::Visible) {
+            stack.extend(children(conn, &element).unwrap_or_default());
+        }
+    }
+    None
+}
+
+/// Inserts `text` at the caret of the app's focused text field, replacing any selection.
+///
+/// `Ok(false)` when the app has no focused text field, the field ignored the insertion, or the
+/// text holds control characters: those act as key presses (Return, Tab), which insertion cannot do.
+pub(crate) fn insert_text(conn: &Connection, app: &LinuxElement, text: &str) -> Result<bool> {
+    if text.chars().any(char::is_control) {
+        return Ok(false);
+    }
+    let Some(element) = focused_editable(conn, app) else { return Ok(false) };
+    let field: TextProxyBlocking<'_> = proxy(conn, &element)?;
+    let editable: EditableTextProxyBlocking<'_> = proxy(conn, &element)?;
+    let caret = match field.get_selection(0) {
+        Ok((start, end)) if start < end => {
+            editable.delete_text(start, end).map_err(dbus)?;
+            start
+        }
+        _ => field.caret_offset().map_err(dbus)?,
+    };
+    let before = field.character_count().map_err(dbus)?;
+    let length = i32::try_from(text.len()).map_err(|_| Error::invalid("the text is too long"))?;
+    editable.insert_text(caret, text, length).map_err(dbus)?;
+    let inserted = field.character_count().map_err(dbus)? - before;
+    if inserted <= 0 {
+        return Ok(false);
+    }
+    let _ = field.set_caret_offset(caret + inserted);
+    Ok(true)
 }
 
 pub(crate) fn value(conn: &Connection, element: &LinuxElement) -> Result<Option<String>> {

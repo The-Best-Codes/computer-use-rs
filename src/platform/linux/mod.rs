@@ -14,7 +14,7 @@ use self::screenshot::Shot;
 use self::session::SessionEnv;
 
 use crate::app::AppInfo;
-use crate::backend::{Backend, Capture, CaptureRequest, InputTarget, MouseButton};
+use crate::backend::{Backend, Capture, CaptureRequest, Delivery, InputTarget, MouseButton};
 use crate::error::{Error, Result};
 use crate::geometry::Point;
 use crate::keys::KeyChord;
@@ -81,12 +81,21 @@ impl LinuxBackend {
     /// Keyboard and pointer events are injected through the X server, so under Wayland they only
     /// reach X11 (`XWayland`) apps. Reporting success for a native Wayland app would hide that
     /// nothing happened.
+    ///
+    /// Events are delivered to the active window rather than to a chosen app, so the target's
+    /// window is activated first.
     fn ensure_input_reaches(&self, target: &InputTarget<'_>) -> Result<()> {
-        if self.session.get("WAYLAND_DISPLAY").is_none() {
-            return Ok(());
-        }
         let Some(pid) = target.app.pid else { return Ok(()) };
-        if screenshot::has_x11_window(&self.session, pid) == Some(false) {
+        let (title, frame) = target.window.map(|w| (w.title.as_deref(), w.frame)).unwrap_or_default();
+        if screenshot::activate_window(&self.session, pid, title, frame) == Some(false) {
+            return Err(Error::Unsupported(format!(
+                "{} could not be brought to the front, so synthesized keyboard and pointer input would reach another app",
+                target.app.name
+            )));
+        }
+        if self.session.get("WAYLAND_DISPLAY").is_some()
+            && screenshot::has_x11_window(&self.session, pid) == Some(false)
+        {
             return Err(Error::Unsupported(format!(
                 "{} uses a native Wayland window, which synthesized keyboard and pointer input cannot reach; \
                  use accessibility actions instead (click an element by index, set a field's value, or perform an element action)",
@@ -153,6 +162,11 @@ impl Backend for LinuxBackend {
         a11y::select_text(&self.conn, element, value, range)
     }
 
+    fn insert_text(&self, app: &AppInfo, text: &str) -> Result<bool> {
+        let root = apps::find_running(&self.conn, app)?;
+        a11y::insert_text(&self.conn, &root, text)
+    }
+
     fn click(&self, target: InputTarget<'_>, point: Point, button: MouseButton, count: u32) -> Result<()> {
         self.ensure_input_reaches(&target)?;
         input::click(&self.conn, point, button, count)
@@ -169,7 +183,12 @@ impl Backend for LinuxBackend {
     }
 
     fn type_text(&self, target: InputTarget<'_>, text: &str) -> Result<()> {
-        self.ensure_input_reaches(&target)?;
+        let reached = self.ensure_input_reaches(&target);
+        // Activating the window focuses its text field, which may now accept the text directly.
+        if target.delivery != Delivery::Global && self.insert_text(target.app, text)? {
+            return Ok(());
+        }
+        reached?;
         input::type_text(&self.conn, text)
     }
 

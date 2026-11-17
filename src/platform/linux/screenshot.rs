@@ -1,7 +1,9 @@
 use std::path::Path;
 
 use x11rb::connection::Connection as _;
-use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _, ImageFormat, ImageOrder, Screen, Visualtype};
+use x11rb::protocol::xproto::{
+    AtomEnum, ClientMessageEvent, ConnectionExt as _, EventMask, ImageFormat, ImageOrder, Screen, Visualtype,
+};
 use x11rb::reexports::x11rb_protocol::parse_display::parse_display;
 use x11rb::reexports::x11rb_protocol::xauth::Family;
 use x11rb::rust_connection::{DefaultStream, RustConnection};
@@ -107,6 +109,36 @@ pub(crate) fn has_x11_window(session: &SessionEnv, pid: u32) -> Option<bool> {
             .and_then(|r| r.value32()?.next())
             == Some(pid)
     }))
+}
+
+/// Asks the window manager to activate the app's top-level X11 window, so that synthesized input,
+/// which goes to whichever window is active, reaches it.
+///
+/// `Some(false)` when the window did not become active; `None` when the app has no known X11 window.
+pub(crate) fn activate_window(session: &SessionEnv, pid: u32, title: Option<&str>, frame: Rect) -> Option<bool> {
+    let (conn, screen_num) = connect(session.display()?, session.xauthority().as_deref())?;
+    let root = conn.setup().roots.get(screen_num)?.root;
+    let (window, _) = client_window(&conn, root, pid, title, frame)?;
+    let active_window = conn.intern_atom(true, b"_NET_ACTIVE_WINDOW").ok()?.reply().ok()?.atom;
+    let is_active = || {
+        let reply = conn.get_property(false, root, active_window, AtomEnum::WINDOW, 0, 1).ok()?.reply().ok()?;
+        Some(reply.value32()?.next() == Some(window))
+    };
+    if is_active()? {
+        return Some(true);
+    }
+    // Source indication 2: a request made on the user's behalf, which is not subject to focus-stealing prevention.
+    let request = ClientMessageEvent::new(32, window, active_window, [2, 0, 0, 0, 0]);
+    let mask = EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY;
+    conn.send_event(false, root, mask, request).ok()?;
+    conn.flush().ok()?;
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        if is_active()? {
+            return Some(true);
+        }
+    }
+    Some(false)
 }
 
 /// The app's top-level X11 window (from the window manager's `_NET_CLIENT_LIST`) and its frame
