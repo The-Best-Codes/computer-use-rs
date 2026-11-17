@@ -62,7 +62,8 @@ impl LinuxBackend {
     /// user's running desktop processes, so the backend also works from services, cron jobs and SSH sessions.
     ///
     /// Also turns on the desktop's accessibility flag (`org.a11y.Status.IsEnabled`),
-    /// which some apps need in order to expose their UI. Apps of that kind that were
+    /// which some apps need in order to expose their UI. It is a desktop setting and stays on
+    /// afterwards. Apps of that kind that were
     /// already running before the flag was on must be restarted to show up.
     ///
     /// # Errors

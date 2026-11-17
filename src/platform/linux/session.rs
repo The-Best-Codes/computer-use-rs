@@ -149,6 +149,10 @@ pub(crate) fn resolve(base: &EnvMap, uid: Option<u32>, process_envs: &[EnvMap], 
         vars.insert(WAYLAND_DISPLAY.into(), wayland);
     }
     for key in INHERITED_KEYS {
+        // The session bus hands out the accessibility bus address; a copy from another process is a last resort.
+        if key == AT_SPI_BUS_ADDRESS && vars.contains_key(DBUS_SESSION_BUS_ADDRESS) {
+            continue;
+        }
         if non_empty(base, key).is_none()
             && let Some(value) = first_session_value(process_envs, key)
         {
@@ -396,6 +400,17 @@ mod tests {
         assert_eq!(session.get("XDG_RUNTIME_DIR"), Some("/run/user/1000"));
         assert_eq!(session.get("WAYLAND_DISPLAY"), Some("wayland-0"));
         assert_eq!(session.xauthority(), Some(PathBuf::from("/run/user/1000/.mutter-Xwaylandauth.ABC")));
+    }
+
+    #[test]
+    fn inherits_accessibility_bus_only_without_session_bus() {
+        let other = [env(&[("AT_SPI_BUS_ADDRESS", "unix:path=/tmp/other")])];
+        let with_bus = FakeFs { sockets: vec!["/run/user/1000/bus"], dirs: vec!["/run/user/1000"] };
+        assert_eq!(resolve(&env(&[]), Some(1000), &other, &with_bus).atspi_bus(), None);
+        let own = env(&[("AT_SPI_BUS_ADDRESS", "unix:path=/tmp/own")]);
+        assert_eq!(resolve(&own, Some(1000), &other, &with_bus).atspi_bus(), Some("unix:path=/tmp/own"));
+        let no_bus = FakeFs { sockets: vec![], dirs: vec![] };
+        assert_eq!(resolve(&env(&[]), Some(1000), &other, &no_bus).atspi_bus(), Some("unix:path=/tmp/other"));
     }
 
     #[test]

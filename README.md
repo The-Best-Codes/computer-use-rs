@@ -85,7 +85,8 @@ the front first.
   appear to have no windows. `Computer::permissions()` reports the current state, and
   `Computer::request_permissions()` shows the system prompts.
 - **Linux:** the session's accessibility bus must be running. It is by default on GNOME and
-  KDE. `Computer::new()` turns on the desktop's accessibility flag, which Chromium, Electron
+  KDE. `Computer::new()` turns on the desktop's accessibility flag (a desktop setting that
+  stays on afterwards), which Chromium, Electron
   and Firefox apps check only at startup: those already running are listed with
   `AppInfo::needs_restart` and must be restarted before they can be inspected. On Wayland you
   get trees and actions, but screenshots only of X11/XWayland windows (other captures are
